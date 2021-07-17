@@ -1,7 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
-using ServiceStack.Caching;
+using System.Threading.Tasks;
 using ServiceStack.DataAnnotations;
 
 namespace ServiceStack
@@ -11,7 +12,7 @@ namespace ServiceStack
     /// </summary>
     [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = true)]
     [Tag("PropertyOrder")]
-    public class ValidateRequestAttribute : AttributeBase, IValidateRule
+    public class ValidateRequestAttribute : AttributeBase, IValidateRule, IReflectAttributeConverter
     {
         public ValidateRequestAttribute() {}
         public ValidateRequestAttribute(string validator) => Validator = validator;
@@ -26,8 +27,7 @@ namespace ServiceStack
         /// ARGS:
         ///   - Request: IRequest
         ///   -     dto: Request DTO
-        ///   -   field: Property Name
-        ///   -      it: Property Value
+        ///   -      it: Request DTO
         /// </summary>
         public string Condition { get; set; }
 
@@ -71,11 +71,46 @@ namespace ServiceStack
             get => throw new NotSupportedException(nameof(AnyConditions));
             set => Condition = ValidateAttribute.Combine("||", value);
         }
-        
+
+        public ReflectAttribute ToReflectAttribute()
+        {
+            var to = new ReflectAttribute {
+                Name = "ValidateRequest",
+                PropertyArgs = new List<KeyValuePair<PropertyInfo, object>>()
+            };
+            if (!string.IsNullOrEmpty(Validator))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Validator)), Validator));
+            else if (!string.IsNullOrEmpty(Condition))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Condition)), Condition));
+            if (!string.IsNullOrEmpty(ErrorCode))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(ErrorCode)), ErrorCode));
+            if (!string.IsNullOrEmpty(Message))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Message)), Message));
+            if (StatusCode != default)
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(StatusCode)), StatusCode));
+            return to;
+        }
+    }
+    //Default ITypeValidator defined in ValidateScripts 
+    public class ValidateIsAuthenticatedAttribute : ValidateRequestAttribute
+    {
+        public ValidateIsAuthenticatedAttribute() : base("IsAuthenticated") { }
+    }
+    public class ValidateIsAdminAttribute : ValidateRequestAttribute
+    {
+        public ValidateIsAdminAttribute() : base("IsAdmin") { }
+    }
+    public class ValidateHasRoleAttribute : ValidateRequestAttribute
+    {
+        public ValidateHasRoleAttribute(string role) : base("HasRole(`" + role + "`)") { }
+    }
+    public class ValidateHasPermissionAttribute : ValidateRequestAttribute
+    {
+        public ValidateHasPermissionAttribute(string permission) : base("HasPermission(`" + permission + "`)") { }
     }
 
     [AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = true)]
-    public class ValidateAttribute : AttributeBase, IValidateRule
+    public class ValidateAttribute : AttributeBase, IValidateRule, IReflectAttributeConverter
     {
         public ValidateAttribute() {}
         public ValidateAttribute(string validator) => Validator = validator;
@@ -138,6 +173,111 @@ namespace ServiceStack
             sb.Append(')');
             return sb.ToString();
         }
+
+        public ReflectAttribute ToReflectAttribute()
+        {
+            var to = new ReflectAttribute {
+                Name = "Validate",
+                PropertyArgs = new List<KeyValuePair<PropertyInfo, object>>()
+            };
+            if (!string.IsNullOrEmpty(Validator))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Validator)), Validator));
+            else if (!string.IsNullOrEmpty(Condition))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Condition)), Condition));
+            if (!string.IsNullOrEmpty(ErrorCode))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(ErrorCode)), ErrorCode));
+            if (!string.IsNullOrEmpty(Message))
+                to.PropertyArgs.Add(new KeyValuePair<PropertyInfo, object>(GetType().GetProperty(nameof(Message)), Message));
+            return to;
+        }
+    }
+
+    //Default IPropertyValidator defined in ValidateScripts 
+    public class ValidateNullAttribute : ValidateAttribute
+    {
+        public ValidateNullAttribute() : base("Null") { }
+    }
+    public class ValidateEmptyAttribute : ValidateAttribute
+    {
+        public ValidateEmptyAttribute() : base("Empty") { }
+    }
+    public class ValidateEmailAttribute : ValidateAttribute
+    {
+        public ValidateEmailAttribute() : base("Email") { }
+    }
+    public class ValidateNotNullAttribute : ValidateAttribute
+    {
+        public ValidateNotNullAttribute() : base("NotNull") { }
+    }
+    public class ValidateNotEmptyAttribute : ValidateAttribute
+    {
+        public ValidateNotEmptyAttribute() : base("NotEmpty") { }
+    }
+    public class ValidateCreditCardAttribute : ValidateAttribute
+    {
+        public ValidateCreditCardAttribute() : base("CreditCard") { }
+    }
+    public class ValidateLengthAttribute : ValidateAttribute
+    {
+        public ValidateLengthAttribute(int min, int max) : base($"Length({min},{max})") { }
+    }
+    public class ValidateExactLengthAttribute : ValidateAttribute
+    {
+        public ValidateExactLengthAttribute(int length) : base($"ExactLength({length})") { }
+    }
+    public class ValidateMaximumLengthAttribute : ValidateAttribute
+    {
+        public ValidateMaximumLengthAttribute(int max) : base($"MaximumLength({max})") { }
+    }
+    public class ValidateMinimumLengthAttribute : ValidateAttribute
+    {
+        public ValidateMinimumLengthAttribute(int min) : base($"MinimumLength({min})") { }
+    }
+    public class ValidateLessThanAttribute : ValidateAttribute
+    {
+        public ValidateLessThanAttribute(int value) : base($"LessThan({value})") { }
+    }
+    public class ValidateLessThanOrEqualAttribute : ValidateAttribute
+    {
+        public ValidateLessThanOrEqualAttribute(int value) : base($"LessThanOrEqual({value})") { }
+    }
+    public class ValidateGreaterThanAttribute : ValidateAttribute
+    {
+        public ValidateGreaterThanAttribute(int value) : base($"GreaterThan({value})") { }
+    }
+    public class ValidateGreaterThanOrEqualAttribute : ValidateAttribute
+    {
+        public ValidateGreaterThanOrEqualAttribute(int value) : base($"GreaterThanOrEqual({value})") { }
+    }
+    public class ValidateScalePrecisionAttribute : ValidateAttribute
+    {
+        public ValidateScalePrecisionAttribute(int scale, int precision) : base($"ScalePrecision({scale},{precision})") { }
+    }
+    public class ValidateRegularExpressionAttribute : ValidateAttribute
+    {
+        public ValidateRegularExpressionAttribute(string pattern) : base($"RegularExpression(`{pattern}`)") { }
+    }
+    public class ValidateEqualAttribute : ValidateAttribute
+    {
+        public ValidateEqualAttribute(string value) : base($"Equal(`{value}`)") { }
+        public ValidateEqualAttribute(int value) : base($"Equal({value})") { }
+    }
+    public class ValidateNotEqualAttribute : ValidateAttribute
+    {
+        public ValidateNotEqualAttribute(string value) : base($"NotEqual(`{value}`)") { }
+        public ValidateNotEqualAttribute(int value) : base($"NotEqual({value})") { }
+    }
+    public class ValidateInclusiveBetweenAttribute : ValidateAttribute
+    {
+        public ValidateInclusiveBetweenAttribute(string from, string to) : base($"InclusiveBetween(`{from}`,`{to}`)") { }
+        public ValidateInclusiveBetweenAttribute(char from, char to) : base($"InclusiveBetween(`{from}`,`{to}`)") { }
+        public ValidateInclusiveBetweenAttribute(int from, int to) : base($"InclusiveBetween({from},{to})") { }
+    }
+    public class ValidateExclusiveBetweenAttribute : ValidateAttribute
+    {
+        public ValidateExclusiveBetweenAttribute(string from, string to) : base($"ExclusiveBetween(`{from}`,`{to}`)") { }
+        public ValidateExclusiveBetweenAttribute(char from, char to) : base($"ExclusiveBetween(`{from}`,`{to}`)") { }
+        public ValidateExclusiveBetweenAttribute(int from, int to) : base($"ExclusiveBetween({from},{to})") { }
     }
 
     public interface IValidateRule
@@ -148,7 +288,7 @@ namespace ServiceStack
         string Message { get; set; }
     }
 
-    public class ValidateRuleBase : IValidateRule 
+    public class ValidateRule : IValidateRule 
     {
         public string Validator { get; set; }
         public string Condition { get; set; }
@@ -161,16 +301,19 @@ namespace ServiceStack
         IEnumerable<KeyValuePair<string, IValidateRule>> GetValidationRules(Type type);
     }
 
-    public interface IValidationSourceWriter
+    public interface IValidationSourceAdmin
     {
-        void SaveValidationRules(List<ValidateRule> validateRules);
-        void DeleteValidationRules(params int[] ids);
+        Task<List<ValidationRule>> GetAllValidateRulesAsync(string typeName);
+        Task SaveValidationRulesAsync(List<ValidationRule> validateRules);
+        Task<List<ValidationRule>> GetValidateRulesByIdsAsync(params int[] ids);
+        Task DeleteValidationRulesAsync(params int[] ids);
+        Task ClearCacheAsync();
     }
 
     /// <summary>
     /// Data persistence Model 
     /// </summary>
-    public class ValidateRule : ValidateRuleBase
+    public class ValidationRule : ValidateRule
     {
         [AutoIncrement]
         public int Id { get; set; }
@@ -186,11 +329,6 @@ namespace ServiceStack
         /// </summary>
         public string Field { get; set; }
         
-        /// <summary>
-        /// Results sorted in ascending SortOrder, Id
-        /// </summary>
-        public int SortOrder { get; set; }
-        
         public string CreatedBy { get; set; }
         public DateTime? CreatedDate { get; set; }
         
@@ -202,5 +340,41 @@ namespace ServiceStack
         public DateTime? SuspendedDate { get; set; }
 
         public string Notes { get; set; }
+
+        protected bool Equals(ValidationRule other)
+        {
+            return Id == other.Id &&
+                   Type == other.Type && Field == other.Field &&
+                   CreatedBy == other.CreatedBy && Nullable.Equals(CreatedDate, other.CreatedDate) &&
+                   ModifiedBy == other.ModifiedBy && Nullable.Equals(ModifiedDate, other.ModifiedDate) &&
+                   SuspendedBy == other.SuspendedBy && Nullable.Equals(SuspendedDate, other.SuspendedDate) &&
+                   Notes == other.Notes;
+        }
+
+        public override bool Equals(object obj)
+        {
+            if (ReferenceEquals(null, obj)) return false;
+            if (ReferenceEquals(this, obj)) return true;
+            if (obj.GetType() != this.GetType()) return false;
+            return Equals((ValidationRule) obj);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                var hashCode = Id;
+                hashCode = (hashCode * 397) ^ (Type != null ? Type.GetHashCode() : 0);
+                hashCode = (hashCode * 397) ^ (Field != null ? Field.GetHashCode() : 0);
+                hashCode = (hashCode * 397) ^ (CreatedBy != null ? CreatedBy.GetHashCode() : 0);
+                hashCode = (hashCode * 397) ^ CreatedDate.GetHashCode();
+                hashCode = (hashCode * 397) ^ (ModifiedBy != null ? ModifiedBy.GetHashCode() : 0);
+                hashCode = (hashCode * 397) ^ ModifiedDate.GetHashCode();
+                hashCode = (hashCode * 397) ^ (SuspendedBy != null ? SuspendedBy.GetHashCode() : 0);
+                hashCode = (hashCode * 397) ^ SuspendedDate.GetHashCode();
+                hashCode = (hashCode * 397) ^ (Notes != null ? Notes.GetHashCode() : 0);
+                return hashCode;
+            }
+        }
     }
 }

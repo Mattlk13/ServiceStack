@@ -14,7 +14,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
     public class EncryptedMessagesAppHost : AppSelfHostBase
     {
         public EncryptedMessagesAppHost()
-            : base(typeof(EncryptedMessagesAppHost).Name, typeof(SecureServices).Assembly)
+            : base(nameof(EncryptedMessagesAppHost), typeof(SecureServices).Assembly)
         { }
 
         public override void Configure(Container container)
@@ -112,7 +112,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
         }
 
         [Test]
-        public void Can_Send_Secure_Restriced_Encrypted_Message_with_ServiceClients()
+        public void Can_Send_Secure_Restricted_Encrypted_Message_with_ServiceClients()
         {
             var client = CreateClient();
             IEncryptedClient encryptedClient = client.GetEncryptedClient(client.Get(new GetPublicKey()));
@@ -131,6 +131,17 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
             encryptedClient.Send(new HelloOneWay { Name = "World" });
 
             Assert.That(HelloOneWay.LastName, Is.EqualTo("World"));
+        }
+
+        [Test]
+        public void Can_Send_Encrypted_EmptyRequest_with_ServiceClients()
+        {
+            var client = CreateClient();
+            IEncryptedClient encryptedClient = client.GetEncryptedClient(client.Get(new GetPublicKey()));
+
+            var response = encryptedClient.Delete(new EncryptedDelete());
+
+            Assert.That(response, Is.Not.Null);
         }
 
         [Test]
@@ -272,8 +283,9 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
             }
             catch (WebServiceException ex)
             {
-                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(typeof(ArgumentNullException).Name));
-                Assert.That(ex.ResponseStatus.Message, Is.EqualTo($"Value cannot be null.{Environment.NewLine}Parameter name: Name"));
+                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(nameof(ArgumentNullException)));
+                Assert.That(ex.ResponseStatus.Message, Is.EqualTo($"Value cannot be null.{Environment.NewLine}Parameter name: Name")
+                    .Or.EqualTo("Value cannot be null. (Parameter 'Name')"));
             }
 
             try
@@ -357,7 +369,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
             var authRsaEncCryptAuthKeys = HmacUtils.Authenticate(rsaEncCryptAuthKeys, authKey, iv);
 
             var timestamp = DateTime.UtcNow.ToUnixTime();
-            var requestBody = timestamp + " POST " + typeof(HelloSecure).Name + " " + request.ToJson();
+            var requestBody = timestamp + " POST " + nameof(HelloSecure) + " " + request.ToJson();
 
             var encryptedBytes = AesUtils.Encrypt(requestBody.ToUtf8Bytes(), cryptKey, iv);
             var authEncryptedBytes = HmacUtils.Authenticate(encryptedBytes, authKey, iv);
@@ -399,7 +411,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
 
             var timestamp = DateTime.UtcNow.Subtract(TimeSpan.FromMinutes(21)).ToUnixTime();
 
-            var requestBody = timestamp + " POST " + typeof(HelloSecure).Name + " " + request.ToJson();
+            var requestBody = timestamp + " POST " + nameof(HelloSecure) + " " + request.ToJson();
 
             var encryptedBytes = AesUtils.Encrypt(requestBody.ToUtf8Bytes(), cryptKey, iv);
             var authEncryptedBytes = HmacUtils.Authenticate(encryptedBytes, authKey, iv);
@@ -449,7 +461,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.UseCases
             var authRsaEncCryptAuthKeys = HmacUtils.Authenticate(rsaEncCryptAuthKeys, authKey, iv);
 
             var timestamp = DateTime.UtcNow.ToUnixTime();
-            var requestBody = timestamp + " POST " + typeof(HelloSecure).Name + " " + request.ToJson();
+            var requestBody = timestamp + " POST " + nameof(HelloSecure) + " " + request.ToJson();
 
             var encryptedBytes = AesUtils.Encrypt(requestBody.ToUtf8Bytes(), cryptKey, iv);
             var authEncryptedBytes = HmacUtils.Authenticate(encryptedBytes, authKey, iv);

@@ -9,10 +9,10 @@ namespace ServiceStack.NativeTypes.TypeScript
 {
     public class TypeScriptGenerator
     {
-        readonly MetadataTypesConfig Config;
+        public readonly MetadataTypesConfig Config;
         readonly NativeTypesFeature feature;
-        List<string> conflictTypeNames = new List<string>();
-        List<MetadataType> allTypes;
+        List<string> conflictTypeNames = new();
+        public List<MetadataType> AllTypes { get; set; }
 
         public TypeScriptGenerator(MetadataTypesConfig config)
         {
@@ -25,14 +25,16 @@ namespace ServiceStack.NativeTypes.TypeScript
         public static bool EmitPartialConstructors { get; set; } = true;
 
         public static Action<StringBuilderWrapper, MetadataType> PreTypeFilter { get; set; }
+        public static Action<StringBuilderWrapper, MetadataType> InnerTypeFilter { get; set; }
         public static Action<StringBuilderWrapper, MetadataType> PostTypeFilter { get; set; }
-
-        public static List<string> DefaultImports = new List<string>
-        {
+        
+        public static Action<StringBuilderWrapper, MetadataPropertyType, MetadataType> PrePropertyFilter { get; set; }
+        public static Action<StringBuilderWrapper, MetadataPropertyType, MetadataType> PostPropertyFilter { get; set; }
+        
+        public static List<string> DefaultImports = new() {
         };
 
-        public static Dictionary<string, string> TypeAliases = new Dictionary<string, string>
-        {
+        public static Dictionary<string, string> TypeAliases = new() {
             {"String", "string"},
             {"Boolean", "boolean"},
             {"DateTime", "string"},
@@ -50,17 +52,25 @@ namespace ServiceStack.NativeTypes.TypeScript
             {"Single", "number"},
             {"Double", "number"},
             {"Decimal", "number"},
+            {"IntPtr", "number"},
             {"List", "Array"},
-            {"Byte[]", "Uint8Array"},
-            {"Stream", "Blob"},
+            {"Byte[]", "string"},
+            {"Stream", "string"},
             {"HttpWebResponse", "Blob"},
             {"IDictionary", "any"},
             {"OrderedDictionary", "any"},
             {"Uri", "string"},
+            {"Type", "string"},
         };
+
+        public static Dictionary<string, string> ReturnTypeAliases = new() {
+            {"Byte[]", "Blob"},
+            {"Stream", "Blob"},
+            {"HttpWebResponse", "Blob"},
+        };
+        
         private static string declaredEmptyString = "''";
-        private static readonly Dictionary<string, string> primitiveDefaultValues = new Dictionary<string, string>
-        {
+        private static readonly Dictionary<string, string> primitiveDefaultValues = new() {
             {"String", declaredEmptyString},
             {"string", declaredEmptyString},
             {"Boolean", "false"},
@@ -83,6 +93,7 @@ namespace ServiceStack.NativeTypes.TypeScript
             {"Single", "0"},
             {"Double", "0"},
             {"Decimal", "0"},
+            {"IntPtr", "0"},
             {"number", "0"},
             {"List", "[]"},
             {"Uint8Array", "new Uint8Array(0)"},
@@ -98,6 +109,8 @@ namespace ServiceStack.NativeTypes.TypeScript
 
         public static List<MetadataType> DefaultFilterTypes(List<MetadataType> types) => types.OrderTypesByDeps();
         
+        public static bool InsertTsNoCheck { get; set; }
+        
         /// <summary>
         /// Add Code to top of generated code
         /// </summary>
@@ -111,6 +124,32 @@ namespace ServiceStack.NativeTypes.TypeScript
         public string DictionaryDeclaration { get; set; } = "export class Dictionary<T> { [Key: string]: T; }";
         
         public HashSet<string> AddedDeclarations { get; set; } = new HashSet<string>();
+
+        public static Func<TypeScriptGenerator, MetadataType, MetadataPropertyType, string> PropertyTypeFilter { get; set; }
+
+        /// <summary>
+        /// Whether property should be marked optional
+        /// </summary>
+        public static Func<TypeScriptGenerator, MetadataType, MetadataPropertyType, bool?> IsPropertyOptional { get; set; } =
+            DefaultIsPropertyOptional;
+
+        /// <summary>
+        /// Helper to make Nullable properties
+        /// </summary>
+        public static bool UseNullableProperties
+        {
+            set
+            {
+                if (value)
+                {
+                    IsPropertyOptional = (gen, type, prop) => false;
+                    PropertyTypeFilter = (gen, type, prop) => 
+                        prop.IsRequired == true
+                            ? gen.GetPropertyType(prop, out _)
+                            : gen.GetPropertyType(prop, out _) + "|null";
+                }
+            }
+        }
 
         public string GetCode(MetadataTypes metadata, IRequest request, INativeTypesMetadata nativeTypes)
         {
@@ -140,9 +179,7 @@ namespace ServiceStack.NativeTypes.TypeScript
             sb.AppendLine();
             sb.AppendLine("{0}GlobalNamespace: {1}".Fmt(defaultValue("GlobalNamespace"), Config.GlobalNamespace));
 
-            if (!Config.ExportAsTypes) // Optional properties only on interfaces
-                sb.AppendLine("{0}MakePropertiesOptional: {1}".Fmt(defaultValue("MakePropertiesOptional"), Config.MakePropertiesOptional));
-            
+            sb.AppendLine("{0}MakePropertiesOptional: {1}".Fmt(defaultValue("MakePropertiesOptional"), Config.MakePropertiesOptional));
             sb.AppendLine("{0}AddServiceStackTypes: {1}".Fmt(defaultValue("AddServiceStackTypes"), Config.AddServiceStackTypes));
             sb.AppendLine("{0}AddResponseStatus: {1}".Fmt(defaultValue("AddResponseStatus"), Config.AddResponseStatus));
             sb.AppendLine("{0}AddImplicitVersion: {1}".Fmt(defaultValue("AddImplicitVersion"), Config.AddImplicitVersion));
@@ -158,25 +195,25 @@ namespace ServiceStack.NativeTypes.TypeScript
 
             var existingTypes = new HashSet<string>();
 
-            var requestTypes = metadata.Operations.Select(x => x.Request).ToHashSet();
+            var requestTypes = metadata.Operations.Select(x => x.Request).ToSet();
             var requestTypesMap = metadata.Operations.ToSafeDictionary(x => x.Request);
             var responseTypes = metadata.Operations
                 .Where(x => x.Response != null)
-                .Select(x => x.Response).ToHashSet();
+                .Select(x => x.Response).ToSet();
             var types = metadata.Types.CreateSortedTypeList();
 
-            allTypes = metadata.GetAllTypesOrdered();
-            allTypes.RemoveAll(x => x.IgnoreType(Config, includeList));
-            allTypes = FilterTypes(allTypes);
+            AllTypes = metadata.GetAllTypesOrdered();
+            AllTypes.RemoveAll(x => x.IgnoreType(Config, includeList));
+            AllTypes = FilterTypes(AllTypes);
 
             //TypeScript doesn't support reusing same type name with different generic airity
-            var conflictPartialNames = allTypes.Map(x => x.Name).Distinct()
+            var conflictPartialNames = AllTypes.Map(x => x.Name).Distinct()
                 .GroupBy(g => g.LeftPart('`'))
                 .Where(g => g.Count() > 1)
                 .Select(g => g.Key)
                 .ToList();
 
-            this.conflictTypeNames = allTypes
+            this.conflictTypeNames = AllTypes
                 .Where(x => conflictPartialNames.Any(name => x.Name.StartsWith(name)))
                 .Map(x => x.Name);
 
@@ -198,12 +235,15 @@ namespace ServiceStack.NativeTypes.TypeScript
                 sb = sb.Indent();
             }
 
-            var insertCode = InsertCodeFilter?.Invoke(allTypes, Config);
+            var insertCode = InsertCodeFilter?.Invoke(AllTypes, Config);
             if (insertCode != null)
                 sb.AppendLine(insertCode);
+            
+            if (InsertTsNoCheck)
+                sb.AppendLine("// @ts-nocheck");
 
             //ServiceStack core interfaces
-            foreach (var type in allTypes)
+            foreach (var type in AllTypes)
             {
                 var fullTypeName = type.GetFullName();
                 if (requestTypes.Contains(type))
@@ -219,22 +259,28 @@ namespace ServiceStack.NativeTypes.TypeScript
                         lastNS = AppendType(ref sb, type, lastNS,
                             new CreateTypeOptions
                             {
+                                Routes = metadata.Operations.GetRoutes(type),
                                 ImplementsFn = () =>
                                 {
                                     if (!Config.AddReturnMarker
-                                        && !type.ReturnVoidMarker
-                                        && type.ReturnMarkerTypeName == null)
+                                        && operation?.ReturnsVoid != true
+                                        && operation?.ReturnType == null)
                                         return null;
 
-                                    if (type.ReturnVoidMarker)
-                                        return "IReturnVoid";
-                                    if (type.ReturnMarkerTypeName != null)
-                                        return Type("IReturn`1", new[] { Type(type.ReturnMarkerTypeName).InReturnMarker() });
+                                    if (operation?.ReturnsVoid == true)
+                                        return nameof(IReturnVoid);
+                                    if (operation?.ReturnType != null)
+                                        return Type("IReturn`1", new[] {
+                                            ReturnTypeAliases.TryGetValue(operation.ReturnType.Name, out var returnTypeAlias)
+                                                ? returnTypeAlias
+                                                : Type(operation.ReturnType)
+                                        });
                                     return response != null
-                                        ? Type("IReturn`1", new[] { Type(response.Name, response.GenericArgs).InReturnMarker() })
+                                        ? Type("IReturn`1", new[] { Type(response.Name, response.GenericArgs) })
                                         : null;
                                 },
                                 IsRequest = true,
+                                Op = operation,
                             });
 
                         existingTypes.Add(fullTypeName);
@@ -263,7 +309,7 @@ namespace ServiceStack.NativeTypes.TypeScript
                 }
             }
 
-            var addCode = AddCodeFilter?.Invoke(allTypes, Config);
+            var addCode = AddCodeFilter?.Invoke(AllTypes, Config);
             if (addCode != null)
                 sb.AppendLine(addCode);
 
@@ -284,13 +330,14 @@ namespace ServiceStack.NativeTypes.TypeScript
         {
             sb.AppendLine();
             AppendComments(sb, type.Description);
-            if (type.Routes != null)
+            if (options?.Routes != null)
             {
-                AppendAttributes(sb, type.Routes.ConvertAll(x => x.ToMetadataAttribute()));
+                AppendAttributes(sb, options.Routes.ConvertAll(x => x.ToMetadataAttribute()));
             }
             AppendAttributes(sb, type.Attributes);
             AppendDataContract(sb, type.DataContract);
 
+            sb.Emit(type, Lang.TypeScript);
             PreTypeFilter?.Invoke(sb, type);
 
             if (type.IsEnum.GetValueOrDefault())
@@ -437,12 +484,13 @@ namespace ServiceStack.NativeTypes.TypeScript
                 sb.AppendLine("{");
 
                 sb = sb.Indent();
+                InnerTypeFilter?.Invoke(sb, type);
 
                 var addVersionInfo = Config.AddImplicitVersion != null && options.IsRequest;
                 if (addVersionInfo)
                 {
                     sb.AppendLine(modifier + "{0}{1}: number; //{2}".Fmt(
-                        "Version".PropertyStyle(), isClass ? "" : "?", Config.AddImplicitVersion));
+                        GetPropertyName("Version"), isClass ? "" : "?", Config.AddImplicitVersion));
                 }
 
                 if (Config.ExportAsTypes)
@@ -459,7 +507,7 @@ namespace ServiceStack.NativeTypes.TypeScript
 
                 AddProperties(sb, type,
                     includeResponseStatus: Config.AddResponseStatus && options.IsResponse
-                        && type.Properties.Safe().All(x => x.Name != typeof(ResponseStatus).Name));
+                        && type.Properties.Safe().All(x => x.Name != nameof(ResponseStatus)));
 
                 if (EmitPartialConstructors && Config.ExportAsTypes && isClass)
                 {
@@ -487,6 +535,15 @@ namespace ServiceStack.NativeTypes.TypeScript
             return lastNS;
         }
 
+        public virtual string GetPropertyType(MetadataPropertyType prop, out bool isNullable)
+        {
+            var propType = Type(prop.GetTypeName(Config, AllTypes), prop.GenericArgs);
+            isNullable = propType.EndsWith("?");
+            if (isNullable)
+                propType = propType.Substring(0, propType.Length - 1);
+            return propType;
+        }
+
         public void AddProperties(StringBuilderWrapper sb, MetadataType type, bool includeResponseStatus)
         {
             var wasAdded = false;
@@ -500,27 +557,21 @@ namespace ServiceStack.NativeTypes.TypeScript
                 {
                     if (wasAdded) sb.AppendLine();
 
-                    var propType = Type(prop.GetTypeName(Config, allTypes), prop.GenericArgs);
-                    var optional = "";
-                    if (propType.EndsWith("?"))
-                    {
-                        propType = propType.Substring(0, propType.Length - 1);
-                        optional = "?";
-                    }
+                    var propType = GetPropertyType(prop, out var optionalProperty);
+                    propType = PropertyTypeFilter?.Invoke(this, type, prop) ?? propType;
 
-                    if (Config.MakePropertiesOptional)
-                        optional = "?";
-
-                    if (prop.Attributes.Safe().FirstOrDefault(x => x.Name == "Required") != null)
-                        optional = "";
-
-                    if (Config.ExportAsTypes && !type.IsInterface.GetValueOrDefault())
-                        optional = "";
+                    var optional = IsPropertyOptional(this, type, prop) ?? optionalProperty
+                        ? "?"
+                        : "";
 
                     wasAdded = AppendComments(sb, prop.Description);
                     wasAdded = AppendDataMember(sb, prop.DataMember, dataMemberIndex++) || wasAdded;
                     wasAdded = AppendAttributes(sb, prop.Attributes) || wasAdded;
-                    sb.AppendLine(modifier + "{1}{2}: {0};".Fmt(propType, prop.Name.SafeToken().PropertyStyle(), optional));
+
+                    sb.Emit(prop, Lang.TypeScript);
+                    PrePropertyFilter?.Invoke(sb, prop, type);
+                    sb.AppendLine(modifier + "{1}{2}: {0};".Fmt(propType, GetPropertyName(prop.Name), optional));
+                    PostPropertyFilter?.Invoke(sb, prop, type);
                 }
             }
 
@@ -530,8 +581,19 @@ namespace ServiceStack.NativeTypes.TypeScript
 
                 AppendDataMember(sb, null, dataMemberIndex++);
                 sb.AppendLine(modifier + "{0}{1}: ResponseStatus;".Fmt(
-                    typeof(ResponseStatus).Name.PropertyStyle(), Config.ExportAsTypes ? "" : "?"));
+                    GetPropertyName(nameof(ResponseStatus)), Config.ExportAsTypes ? "" : "?"));
             }
+        }
+
+        public static bool? DefaultIsPropertyOptional(TypeScriptGenerator generator, MetadataType type, MetadataPropertyType prop)
+        {
+            if (prop.IsRequired == true)
+                return false;
+            
+            if (generator.Config.MakePropertiesOptional)
+                return true;
+
+            return null;
         }
 
         public bool AppendAttributes(StringBuilderWrapper sb, List<MetadataAttribute> attributes)
@@ -591,8 +653,7 @@ namespace ServiceStack.NativeTypes.TypeScript
             return value;
         }
 
-        public static HashSet<string> ArrayTypes = new HashSet<string>
-        {
+        public static HashSet<string> ArrayTypes = new() {
             "List`1",
             "IEnumerable`1",
             "ICollection`1",
@@ -602,8 +663,7 @@ namespace ServiceStack.NativeTypes.TypeScript
             "IEnumerable",
         };
 
-        public static HashSet<string> DictionaryTypes = new HashSet<string>
-        {
+        public static HashSet<string> DictionaryTypes = new() {
             "Dictionary`2",
             "IDictionary`2",
             "IOrderedDictionary`2",
@@ -611,6 +671,12 @@ namespace ServiceStack.NativeTypes.TypeScript
             "StringDictionary",
             "IDictionary",
             "IOrderedDictionary",
+        };
+
+        public static HashSet<string> AllowedKeyTypes = new() {
+            "string",
+            "boolean",
+            "number",
         };
         
         public string Type(MetadataTypeName typeName) => Type(typeName.Name, typeName.GenericArgs);
@@ -672,7 +738,7 @@ namespace ServiceStack.NativeTypes.TypeScript
                 else if (DictionaryTypes.Contains(type))
                 {
                     cooked = "{{ [index: {0}]: {1}; }}".Fmt(
-                        GenericArg(genericArgs[0]),
+                        GetKeyType(GenericArg(genericArgs[0])),
                         GenericArg(genericArgs[1]));
                 }
                 else
@@ -833,6 +899,9 @@ namespace ServiceStack.NativeTypes.TypeScript
         {
             var sb = new StringBuilder();
 
+            if (node.Text == "Nullable")
+                return TypeAlias(node.Children[0].Text);
+
             if (node.Text == "List")
             {
                 sb.Append(ConvertFromCSharp(node.Children[0]));
@@ -846,7 +915,8 @@ namespace ServiceStack.NativeTypes.TypeScript
             else if (node.Text == "Dictionary")
             {
                 sb.Append("{ [index:");
-                sb.Append(ConvertFromCSharp(node.Children[0]));
+                var keyType = ConvertFromCSharp(node.Children[0]);
+                sb.Append(GetKeyType(keyType));
                 sb.Append("]: ");
                 sb.Append(ConvertFromCSharp(node.Children[1]));
                 sb.Append("; }");
@@ -875,6 +945,16 @@ namespace ServiceStack.NativeTypes.TypeScript
 
             return sb.ToString();
         }
+
+        private static string GetKeyType(string keyType)
+        {
+            var jsKeyType = AllowedKeyTypes.Contains(keyType)
+                ? keyType
+                : "string";
+            return jsKeyType;
+        }
+
+        public string GetPropertyName(string name) => name.SafeToken().PropertyStyle();
     }
 
     public static class TypeScriptGeneratorExtensions

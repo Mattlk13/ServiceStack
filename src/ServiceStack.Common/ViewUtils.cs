@@ -169,6 +169,7 @@ namespace ServiceStack
 
         public DefaultScripts Defaults { get; set; } = ViewUtils.DefaultScripts;
         
+        public string Display { get; set; }
         internal int Depth { get; set; }
         internal int ChildDepth { get; set; } = 1;
         internal bool HasCaption { get; set; }
@@ -199,6 +200,9 @@ namespace ServiceStack
                     : null,
                 CaptionIfEmpty = options.TryGetValue("captionIfEmpty", out var captionIfEmpty)
                     ? captionIfEmpty?.ToString()
+                    : null,
+                Display = options.TryGetValue("display", out var display)
+                    ? display?.ToString()
                     : null,
                 Defaults = defaults ?? ViewUtils.DefaultScripts,
             };
@@ -626,7 +630,9 @@ namespace ServiceStack
         public static string TextDump(this object target) => DefaultScripts.TextDump(target, null); 
         public static string TextDump(this object target, TextDumpOptions options) => DefaultScripts.TextDump(target, options); 
         public static string DumpTable(this object target) => DefaultScripts.TextDump(target, null); 
-        public static string DumpTable(this object target, TextDumpOptions options) => DefaultScripts.TextDump(target, options); 
+        public static void PrintDumpTable(this object target) => DumpTable(target).Print(); 
+        public static string DumpTable(this object target, TextDumpOptions options) => DefaultScripts.TextDump(target, options);
+        public static void PrintDumpTable(this object target, TextDumpOptions options) => DumpTable(target, options).Print(); 
         
         public static string HtmlDump(object target) => HtmlScripts.HtmlDump(target, null); 
         public static string HtmlDump(object target, HtmlDumpOptions options) => HtmlScripts.HtmlDump(target, options); 
@@ -992,7 +998,7 @@ namespace ServiceStack
             className = HtmlScripts.htmlAddClass(className, inputClass);
 
             if (size != null)
-                className = HtmlScripts.htmlAddClass(className, (notInput || isCheck ? inputClass : "input") + "-" + size);
+                className = HtmlScripts.htmlAddClass(className, inputClass + "-" + size);
 
             var errorMsg = ErrorResponse(GetErrorStatus(req), name);
             if (errorMsg != null)
@@ -1055,7 +1061,7 @@ namespace ServiceStack
                         : oValue == null
                             ? TypeConstants<string>.EmptyHashSet
                             : (FormValues(req, name) ?? ToStringList(oValue as IEnumerable).ToArray())
-                                  .ToHashSet();
+                                  .ToSet();
                                 
                     foreach (var kvp in kvps)
                     {

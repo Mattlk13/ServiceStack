@@ -60,6 +60,7 @@ namespace ServiceStack
         public string RefreshTokenUri { get; set; }
 
         public bool UseTokenCookie { get; set; }
+        public bool UseCookies { get; set; } = true;
 
         /// <summary>
         /// Gets the collection of headers to be added to outgoing requests.
@@ -122,21 +123,29 @@ namespace ServiceStack
             if (HttpClient != null)
                 return HttpClient;
 
-            if (HttpMessageHandler == null && GlobalHttpMessageHandlerFactory != null)
-                HttpMessageHandler = GlobalHttpMessageHandlerFactory();
+            var handler = HttpMessageHandler;
 
-            var handler = HttpMessageHandler ?? new HttpClientHandler
+            if (handler == null && GlobalHttpMessageHandlerFactory != null)
+                handler = GlobalHttpMessageHandlerFactory();
+
+            if (handler == null)
             {
-                UseCookies = true,
-                CookieContainer = CookieContainer,
-                UseDefaultCredentials = Credentials == null,
-                Credentials = Credentials,
-                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-            };
-
+                var useHandler = new HttpClientHandler
+                {
+                    CookieContainer = CookieContainer,
+                    UseDefaultCredentials = Credentials == null,
+                    Credentials = Credentials,
+                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+                };
+                if (UseCookies) //UseCookies throws in Blazor, only set if true
+                    useHandler.UseCookies = UseCookies;
+                
+                handler = useHandler;
+            }
+            
             var baseUri = BaseUri != null ? new Uri(BaseUri) : null;
 
-            var client = new HttpClient(handler) { BaseAddress = baseUri };
+            var client = new HttpClient(handler, disposeHandler: HttpMessageHandler == null) { BaseAddress = baseUri };
 
             if (BearerToken != null)
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", BearerToken);
@@ -170,7 +179,7 @@ namespace ServiceStack
             {
                 using (var zip = new GZipStream(stream, CompressionMode.Compress, true))
                 {
-                    await content.CopyToAsync(zip);
+                    await content.CopyToAsync(zip).ConfigAwait();
                 }
             }
 
@@ -197,7 +206,7 @@ namespace ServiceStack
             {
                 using (var zip = new DeflateStream(stream, CompressionMode.Compress, true))
                 {
-                    await content.CopyToAsync(zip);
+                    await content.CopyToAsync(zip).ConfigAwait();
                 }
             }
 
@@ -208,7 +217,7 @@ namespace ServiceStack
             }
         }
 
-        public Task<TResponse> SendAsync<TResponse>(string httpMethod, string absoluteUrl, object request, CancellationToken token = default)
+        public async Task<TResponse> SendAsync<TResponse>(string httpMethod, string absoluteUrl, object request, CancellationToken token = default)
         {
             var client = GetHttpClient();
 
@@ -216,9 +225,7 @@ namespace ServiceStack
             {
                 var queryString = QueryStringSerializer.SerializeToString(request);
                 if (!string.IsNullOrEmpty(queryString))
-                {
                     absoluteUrl += "?" + queryString;
-                }
             }
 
             try
@@ -231,98 +238,89 @@ namespace ServiceStack
                     log.Debug("Could not parse URL: " + absoluteUrl, ex);
             }
 
-            var response = ResultsFilter?.Invoke(typeof(TResponse), httpMethod, absoluteUrl, request);
-            if (response is TResponse)
-            {
-                var tcs = new TaskCompletionSource<TResponse>();
-                tcs.SetResult((TResponse)response);
-                return tcs.Task;
-            }
+            var filterResponse = ResultsFilter?.Invoke(typeof(TResponse), httpMethod, absoluteUrl, request);
+            if (filterResponse is TResponse typedResponse)
+                return typedResponse;
 
             var httpReq = CreateRequest(httpMethod, absoluteUrl, request);
-            var sendAsyncTask = client.SendAsync(httpReq, token);
 
-            if (typeof(TResponse) == typeof(HttpResponseMessage))
+            try
             {
-                return (Task<TResponse>)(object)sendAsyncTask;
-            }
+                var httpRes = await client.SendAsync(httpReq, token).ConfigAwait();
 
-            return sendAsyncTask
-                .ContinueWith(responseTask =>
+                if (typeof(TResponse) == typeof(HttpResponseMessage))
+                    return (TResponse)(object) httpRes;
+
+                if (httpRes.StatusCode == HttpStatusCode.Unauthorized)
                 {
-                    var httpRes = responseTask.Result;
-
-                    if (httpRes.StatusCode == HttpStatusCode.Unauthorized)
+                    var hasRefreshTokenCookie = this.GetRefreshTokenCookie() != null;
+                    var hasRefreshToken = RefreshToken != null || hasRefreshTokenCookie;
+                    
+                    if (hasRefreshToken)
                     {
-                        if (RefreshToken != null)
-                        {
-                            var refreshDto = new GetAccessToken { RefreshToken = RefreshToken, UseTokenCookie = UseTokenCookie };
-                            var uri = this.RefreshTokenUri ?? this.BaseUri.CombineWith(refreshDto.ToPostUrl());
+                        var refreshDto = new GetAccessToken { RefreshToken = RefreshToken, UseTokenCookie = UseTokenCookie };
+                        var uri = this.RefreshTokenUri ?? this.BaseUri.CombineWith(refreshDto.ToPostUrl());
 
-                            if (this.UseTokenCookie)
+                        if (this.UseTokenCookie)
+                            this.BearerToken = null;
+
+                        try
+                        {
+                            var accessTokenResponse = await this.PostAsync<GetAccessTokenResponse>(uri, refreshDto, token).ConfigAwait();
+                            
+                            var accessToken = accessTokenResponse?.AccessToken;
+                            var tokenCookie = this.GetTokenCookie();
+                            var refreshRequest = CreateRequest(httpMethod, absoluteUrl, request);
+
+                            if (UseTokenCookie)
                             {
-                                this.BearerToken = null;
+                                if (tokenCookie == null)
+                                    throw new RefreshTokenException("Could not retrieve new AccessToken Cooke from: " + uri);
+
+                                this.SetTokenCookie(tokenCookie);
                             }
+                            else
+                            {
+                                if (string.IsNullOrEmpty(accessToken))
+                                    throw new RefreshTokenException("Could not retrieve new AccessToken from: " + uri);
 
-                            return this.PostAsync<GetAccessTokenResponse>(uri, refreshDto, token)
-                                .ContinueWith(t =>
+                                if (tokenCookie != null)
                                 {
-                                    if (t.IsFaulted)
-                                    {
-                                        if (t.Exception.UnwrapIfSingleException() is WebServiceException refreshEx)
-                                        {
-                                            throw new RefreshTokenException(refreshEx);
-                                        }
-                                        throw t.Exception;
-                                    }
-
-                                    var accessToken = t.Result?.AccessToken;
-                                    var tokenCookie = this.GetTokenCookie();
-                                    var refreshRequest = CreateRequest(httpMethod, absoluteUrl, request);
-
-                                    if (UseTokenCookie)
-                                    {
-                                        if (tokenCookie == null)
-                                            throw new RefreshTokenException("Could not retrieve new AccessToken Cooke from: " + uri);
-
-                                        this.SetTokenCookie(tokenCookie);
-                                    }
-                                    else
-                                    {
-                                        if (string.IsNullOrEmpty(accessToken))
-                                            throw new RefreshTokenException("Could not retrieve new AccessToken from: " + uri);
-
-                                        if (tokenCookie != null)
-                                        {
-                                            this.SetTokenCookie(accessToken);
-                                        }
-                                        else
-                                        {
-                                            refreshRequest.AddBearerToken(this.BearerToken = accessToken);
-                                            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-                                        }
-                                    }
-
-                                    return client.SendAsync(refreshRequest, token).ContinueWith(refreshTask =>
-                                            ConvertToResponse<TResponse>(refreshTask.Result,
-                                                httpMethod, absoluteUrl, refreshRequest, token),
-                                        token).Unwrap();
-
-                                }, token).Unwrap();
+                                    this.SetTokenCookie(accessToken);
+                                }
+                                else
+                                {
+                                    refreshRequest.AddBearerToken(this.BearerToken = accessToken);
+                                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                                }
+                            }
+                            var refreshTokenResponse = await client.SendAsync(refreshRequest, token).ConfigAwait();
+                            return await ConvertToResponse<TResponse>(refreshTokenResponse, httpMethod, absoluteUrl, refreshRequest, token).ConfigAwait();
                         }
-                        if (UserName != null && Password != null && client.DefaultRequestHeaders.Authorization == null)
+                        catch (Exception e)
                         {
-                            AddBasicAuth(client);
-                            httpReq = CreateRequest(httpMethod, absoluteUrl, request);
-                            sendAsyncTask = client.SendAsync(httpReq, token);
-                            return sendAsyncTask.ContinueWith(t =>
-                                    ConvertToResponse<TResponse>(t.Result, httpMethod, absoluteUrl, request, token),
-                                token).Unwrap();
+                            if (e.UnwrapIfSingleException() is WebServiceException refreshEx)
+                                throw new RefreshTokenException(refreshEx);
+
+                            throw;
                         }
                     }
+                    if (UserName != null && Password != null && client.DefaultRequestHeaders.Authorization == null)
+                    {
+                        AddBasicAuth(client);
+                        httpReq = CreateRequest(httpMethod, absoluteUrl, request);
+                        var response = await client.SendAsync(httpReq, token).ConfigAwait();
+                        return await ConvertToResponse<TResponse>(response, httpMethod, absoluteUrl, request, token).ConfigAwait();
+                    }
+                }
 
-                    return ConvertToResponse<TResponse>(httpRes, httpMethod, absoluteUrl, request, token);
-                }, token).Unwrap();
+                return await ConvertToResponse<TResponse>(httpRes, httpMethod, absoluteUrl, request, token).ConfigAwait();
+            }
+            catch (Exception e)
+            {
+                log.Error(e, "HttpClient Exception: " + e.Message);
+                throw;
+            }
         }
 
         private HttpRequestMessage CreateRequest(string httpMethod, string absoluteUrl, object request)
@@ -383,72 +381,43 @@ namespace ServiceStack
             return httpReq;
         }
 
-        private Task<TResponse> ConvertToResponse<TResponse>(HttpResponseMessage httpRes, string httpMethod, string absoluteUrl, object request, CancellationToken token)
+        private async Task<TResponse> ConvertToResponse<TResponse>(HttpResponseMessage httpRes, string httpMethod, string absoluteUrl, object request, CancellationToken token)
         {
             ApplyWebResponseFilters(httpRes);
 
             if (!httpRes.IsSuccessStatusCode && ExceptionFilter != null)
             {
                 var cachedResponse = ExceptionFilter(httpRes, absoluteUrl, typeof(TResponse));
-                if (cachedResponse is TResponse)
-                    return Task.FromResult((TResponse) cachedResponse);
+                if (cachedResponse is TResponse filterResponse)
+                    return filterResponse;
             }
 
             if (typeof(TResponse) == typeof(string))
             {
-                return httpRes.Content.ReadAsStringAsync()
-                    .ContinueWith(task =>
-                    {
-                        ThrowIfError<TResponse>(task, httpRes, request, absoluteUrl, task.Result);
-
-                        var response = (TResponse) (object) task.Result;
-
-                        ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
-
-                        return response;
-                    }, token);
+                var result = await ThrowIfError(() => httpRes.Content.ReadAsStringAsync(), httpRes, request, absoluteUrl).ConfigAwait();
+                var response = (TResponse) (object) result;
+                ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
+                return response;
             }
             if (typeof(TResponse) == typeof(byte[]))
             {
-                return httpRes.Content.ReadAsByteArrayAsync()
-                    .ContinueWith(task =>
-                    {
-                        ThrowIfError<TResponse>(task, httpRes, request, absoluteUrl, task.Result);
-
-                        var response = (TResponse) (object) task.Result;
-
-                        ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
-
-                        return response;
-                    }, token);
+                var result = await ThrowIfError(() => httpRes.Content.ReadAsByteArrayAsync(), httpRes, request, absoluteUrl).ConfigAwait();
+                var response = (TResponse) (object) result;
+                ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
+                return response;
             }
             if (typeof(TResponse) == typeof(Stream))
             {
-                return httpRes.Content.ReadAsStreamAsync()
-                    .ContinueWith(task =>
-                    {
-                        ThrowIfError<TResponse>(task, httpRes, request, absoluteUrl, task.Result);
-
-                        var response = (TResponse) (object) task.Result;
-
-                        ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
-
-                        return response;
-                    }, token);
+                var result = await ThrowIfError(() => httpRes.Content.ReadAsStreamAsync(), httpRes, request, absoluteUrl).ConfigAwait();
+                var response = (TResponse) (object) result;
+                ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
+                return response;
             }
 
-            return httpRes.Content.ReadAsStringAsync()
-                .ContinueWith(task =>
-                {
-                    ThrowIfError<TResponse>(task, httpRes, request, absoluteUrl, task.Result);
-
-                    var body = task.Result;
-                    var response = body.FromJson<TResponse>();
-
-                    ResultsFilterResponse?.Invoke(httpRes, response, httpMethod, absoluteUrl, request);
-
-                    return response;
-                }, token);
+            var json = await ThrowIfError(() => httpRes.Content.ReadAsStringAsync(), httpRes, request, absoluteUrl).ConfigAwait();
+            var obj = json.FromJson<TResponse>();
+            ResultsFilterResponse?.Invoke(httpRes, obj, httpMethod, absoluteUrl, request);
+            return obj;
         }
 
         public Action<HttpRequestMessage> RequestFilter { get; set; }
@@ -469,16 +438,24 @@ namespace ServiceStack
             GlobalResponseFilter?.Invoke(httpRes);
         }
 
-
-        private void ThrowIfError<TResponse>(Task task, HttpResponseMessage httpRes, object request, string requestUri, object response)
+        private async Task<TResponse> ThrowIfError<TResponse>(Func<Task<TResponse>> fn, HttpResponseMessage httpRes, object request, string requestUri)
         {
             Interlocked.Decrement(ref activeAsyncRequests);
 
-            if (task.IsFaulted)
-                throw CreateException<TResponse>(httpRes, task.Exception);
+            TResponse response;
+            try
+            {
+                response = await fn().ConfigAwait();
+            }
+            catch (Exception e)
+            {
+                throw CreateException<TResponse>(httpRes, e);
+            }
 
             if (!httpRes.IsSuccessStatusCode)
                 ThrowResponseTypeException<TResponse>(httpRes, request, requestUri, response);
+
+            return response;
         }
 
         private void AddBasicAuth(HttpClient client)
@@ -625,24 +602,44 @@ namespace ServiceStack
         }
 
         public virtual Task<TResponse> SendAsync<TResponse>(object request) => SendAsync<TResponse>(request, default);
-        public virtual Task<TResponse> SendAsync<TResponse>(object request, CancellationToken token)
+        public virtual async Task<TResponse> SendAsync<TResponse>(object request, CancellationToken token)
         {
             if (typeof(TResponse) == typeof(object))
-                return this.SendAsync(this.GetResponseType(request), request, token)
-                    .ContinueWith(t => (TResponse)t.Result, token);
+            {
+                var result = await this.SendAsync(this.GetResponseType(request), request, token).ConfigAwait();
+                return (TResponse) result;
+            }
 
             if (request is IVerb)
             {
                 if (request is IGet)
-                    return GetAsync<TResponse>(request, token);
+                    return await GetAsync<TResponse>(request, token).ConfigAwait();
                 if (request is IPost)
-                    return PostAsync<TResponse>(request, token);
+                    return await PostAsync<TResponse>(request, token).ConfigAwait();
                 if (request is IPut)
-                    return PutAsync<TResponse>(request, token);
+                    return await PutAsync<TResponse>(request, token).ConfigAwait();
                 if (request is IDelete)
-                    return DeleteAsync<TResponse>(request, token);
+                    return await DeleteAsync<TResponse>(request, token).ConfigAwait();
                 if (request is IPatch)
-                    return PatchAsync<TResponse>(request, token);
+                    return await PatchAsync<TResponse>(request, token).ConfigAwait();
+            }
+
+            if (request is IQuery)
+                return await GetAsync<TResponse>(request, token);
+            if (request is ICrud)
+            {
+                var crudMethod = ServiceClientBase.ToHttpMethod(request.GetType());
+                if (crudMethod != null)
+                {
+                    return crudMethod switch {
+                        HttpMethods.Post => await PostAsync<TResponse>(request, token).ConfigAwait(),
+                        HttpMethods.Put => await PutAsync<TResponse>(request, token).ConfigAwait(),
+                        HttpMethods.Delete => await DeleteAsync<TResponse>(request, token).ConfigAwait(),
+                        HttpMethods.Patch => await PatchAsync<TResponse>(request, token).ConfigAwait(),
+                        HttpMethods.Get => await GetAsync<TResponse>(request, token).ConfigAwait(),
+                        _ => throw new NotSupportedException("Unknown " + crudMethod),
+                    };
+                }
             }
 
             var httpMethod = ServiceClientBase.GetExplicitMethod(request) ?? DefaultHttpMethod;
@@ -650,7 +647,7 @@ namespace ServiceStack
                 ? this.SyncReplyBaseUri.WithTrailingSlash() + request.GetType().Name
                 : Format + "/reply/" + request.GetType().Name);
 
-            return SendAsync<TResponse>(httpMethod, requestUri, request, token);
+            return await SendAsync<TResponse>(httpMethod, requestUri, request, token).ConfigAwait();
         }
 
         public virtual Task<List<TResponse>> SendAllAsync<TResponse>(IEnumerable<object> requests, CancellationToken token)
@@ -739,6 +736,7 @@ namespace ServiceStack
             SendAsync<byte[]>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto, token);
 
 
+
         public Task<TResponse> PutAsync<TResponse>(IReturn<TResponse> requestDto) =>
             SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
         public Task<TResponse> PutAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token) =>
@@ -750,29 +748,39 @@ namespace ServiceStack
             SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto, token);
 
         public Task<TResponse> PutAsync<TResponse>(string relativeOrAbsoluteUrl, object request) =>
-            PutAsync<TResponse>(relativeOrAbsoluteUrl, request, default);
+            SendAsync<TResponse>(HttpMethods.Put, ResolveUrl(HttpMethods.Put, relativeOrAbsoluteUrl), request);
         public Task<TResponse> PutAsync<TResponse>(string relativeOrAbsoluteUrl, object request, CancellationToken token) =>
             SendAsync<TResponse>(HttpMethods.Put, ResolveUrl(HttpMethods.Put, relativeOrAbsoluteUrl), request, token);
 
-        public Task PutAsync(IReturnVoid requestDto) => PutAsync(requestDto, default);
-        public Task<TResponse> PatchAsync<TResponse>(IReturn<TResponse> requestDto) =>
-            SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
-
+        public Task PutAsync(IReturnVoid requestDto) =>
+            SendAsync<byte[]>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
         public Task PutAsync(IReturnVoid requestDto, CancellationToken token) =>
             SendAsync<byte[]>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto, token);
 
-        public Task<TResponse> PatchAsync<TResponse>(object requestDto) => PatchAsync<TResponse>(requestDto, default);
-        public Task PatchAsync(IReturnVoid requestDto) => PatchAsync(requestDto, default);
+        
 
+        public Task<TResponse> PatchAsync<TResponse>(IReturn<TResponse> requestDto) =>
+            SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
+        public Task<TResponse> PatchAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token) =>
+            SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
+
+        public Task<TResponse> PatchAsync<TResponse>(object requestDto) =>
+            SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
         public Task<TResponse> PatchAsync<TResponse>(object requestDto, CancellationToken token) =>
             SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
 
+        public Task<TResponse> PatchAsync<TResponse>(string relativeOrAbsoluteUrl, object request) =>
+            SendAsync<TResponse>(HttpMethods.Patch, ResolveUrl(HttpMethods.Patch, relativeOrAbsoluteUrl), request);
+        public Task<TResponse> PatchAsync<TResponse>(string relativeOrAbsoluteUrl, object request, CancellationToken token) =>
+            SendAsync<TResponse>(HttpMethods.Patch, ResolveUrl(HttpMethods.Patch, relativeOrAbsoluteUrl), request, token);
+
+        public Task PatchAsync(IReturnVoid requestDto) =>
+            SendAsync<byte[]>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
         public Task PatchAsync(IReturnVoid requestDto, CancellationToken token) =>
             SendAsync<byte[]>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
-
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, IReturn<TResponse> requestDto) =>
-            CustomMethodAsync<TResponse>(httpVerb, requestDto, default);
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, IReturn<TResponse> requestDto, CancellationToken token)
+        
+        
+        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, IReturn<TResponse> requestDto, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
@@ -781,9 +789,7 @@ namespace ServiceStack
             return SendAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestBody, token);
         }
 
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, object requestDto) =>
-            CustomMethodAsync<TResponse>(httpVerb, requestDto, default);
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, object requestDto, CancellationToken token)
+        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, object requestDto, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
@@ -792,8 +798,7 @@ namespace ServiceStack
             return SendAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestBody, token);
         }
 
-        public Task CustomMethodAsync(string httpVerb, IReturnVoid requestDto) => CustomMethodAsync(httpVerb, requestDto, default);
-        public Task CustomMethodAsync(string httpVerb, IReturnVoid requestDto, CancellationToken token)
+        public Task CustomMethodAsync(string httpVerb, IReturnVoid requestDto, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
@@ -802,9 +807,7 @@ namespace ServiceStack
             return SendAsync<byte[]>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestBody, token);
         }
 
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, string relativeOrAbsoluteUrl, object request) =>
-            CustomMethodAsync<TResponse>(httpVerb, relativeOrAbsoluteUrl, request, default);
-        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, string relativeOrAbsoluteUrl, object request, CancellationToken token)
+        public Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, string relativeOrAbsoluteUrl, object request, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
@@ -974,11 +977,11 @@ namespace ServiceStack
             return SendAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, request), null).GetSyncResponse();
         }
 
-        public virtual Task<TResponse> PostFileAsync<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName, string mimeType = null, CancellationToken token = default)
+        public virtual async Task<TResponse> PostFileAsync<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName, string mimeType = null, CancellationToken token = default)
         {
-            var content = new MultipartFormDataContent();
-            var fileBytes = fileToUpload.ReadFully();
-            var fileContent = new ByteArrayContent(fileBytes, 0, fileBytes.Length);
+            using var content = new MultipartFormDataContent();
+            var fileBytes = await fileToUpload.ReadFullyAsync(token).ConfigAwait();
+            using var fileContent = new ByteArrayContent(fileBytes, 0, fileBytes.Length);
             fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data")
             {
                 Name = "file",
@@ -987,9 +990,9 @@ namespace ServiceStack
             fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(mimeType ?? MimeTypes.GetMimeType(fileName));
             content.Add(fileContent, "file", fileName);
 
-            return SendAsync<TResponse>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), content, token)
-                .ContinueWith(t => { content.Dispose(); fileContent.Dispose(); return t.Result; },
-                TaskContinuationOptions.ExecuteSynchronously);
+            var result = await SendAsync<TResponse>(HttpMethods.Post,
+                ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), content, token).ConfigAwait();
+            return result;
         }
 
         public TResponse PostFile<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName, string mimeType)
@@ -1007,13 +1010,13 @@ namespace ServiceStack
             return PostFileWithRequestAsync<TResponse>(fileToUpload, fileName, request, fileName).GetSyncResponse();
         }
 
-        public virtual Task<TResponse> PostFileWithRequestAsync<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName,
+        public virtual async Task<TResponse> PostFileWithRequestAsync<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName,
                                                         object request, string fieldName = "upload", CancellationToken token = default)
         {
             var queryString = QueryStringSerializer.SerializeToString(request);
             var nameValueCollection = PclExportClient.Instance.ParseQueryString(queryString);
 
-            var content = new MultipartFormDataContent();
+            using var content = new MultipartFormDataContent();
 
             foreach (string key in nameValueCollection)
             {
@@ -1021,8 +1024,8 @@ namespace ServiceStack
                 content.Add(new StringContent(value), $"\"{key}\"");
             }
 
-            var fileBytes = fileToUpload.ReadFully();
-            var fileContent = new ByteArrayContent(fileBytes, 0, fileBytes.Length);
+            var fileBytes = await fileToUpload.ReadFullyAsync(token).ConfigAwait();
+            using var fileContent = new ByteArrayContent(fileBytes, 0, fileBytes.Length);
             fileContent.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data")
             {
                 Name = "file",
@@ -1031,9 +1034,9 @@ namespace ServiceStack
             fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(MimeTypes.GetMimeType(fileName));
             content.Add(fileContent, "file", fileName);
 
-            return SendAsync<TResponse>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), content, token)
-                .ContinueWith(t => { content.Dispose(); fileContent.Dispose(); return t.Result; },
-                TaskContinuationOptions.ExecuteSynchronously);
+            var result = await SendAsync<TResponse>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl),
+                content, token).ConfigAwait();
+            return result;
         }
 
         public TResponse PostFileWithRequest<TResponse>(string relativeOrAbsoluteUrl, Stream fileToUpload, string fileName,
@@ -1062,12 +1065,12 @@ namespace ServiceStack
             return PostFilesWithRequestAsync<TResponse>(ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), request, files.ToArray(), token);
         }
 
-        public virtual Task<TResponse> PostFilesWithRequestAsync<TResponse>(string requestUri, object request, UploadFile[] files, CancellationToken token = default)
+        public virtual async Task<TResponse> PostFilesWithRequestAsync<TResponse>(string requestUri, object request, UploadFile[] files, CancellationToken token = default)
         {
             var queryString = QueryStringSerializer.SerializeToString(request);
             var nameValueCollection = PclExportClient.Instance.ParseQueryString(queryString);
 
-            var content = new MultipartFormDataContent();
+            using var content = new MultipartFormDataContent();
 
             foreach (string key in nameValueCollection)
             {
@@ -1075,12 +1078,11 @@ namespace ServiceStack
                 content.Add(new StringContent(value), $"\"{key}\"");
             }
 
-            var disposables = new List<IDisposable> { content };
-
+            var disposables = new List<IDisposable>();
             for (int i = 0; i < files.Length; i++)
             {
                 var file = files[i];
-                var fileBytes = file.Stream.ReadFully();
+                var fileBytes = await file.Stream.ReadFullyAsync(token).ConfigAwait();
                 var fileContent = new ByteArrayContent(fileBytes, 0, fileBytes.Length);
                 disposables.Add(fileContent);
                 var fieldName = file.FieldName ?? $"upload{i}";
@@ -1097,9 +1099,15 @@ namespace ServiceStack
                 content.Add(fileContent, fileName, fileName);
             }
 
-            return SendAsync<TResponse>(HttpMethods.Post, requestUri, content, token)
-                .ContinueWith(t => { foreach (var d in disposables) d.Dispose(); return t.Result; },
-                TaskContinuationOptions.ExecuteSynchronously);
+            try
+            {
+                var result = await SendAsync<TResponse>(HttpMethods.Post, requestUri, content, token).ConfigAwait();
+                return result;
+            }
+            finally
+            {
+                foreach (var d in disposables) d.Dispose();
+            }
         }
 
         public void CancelAsync() => throw new NotSupportedException("Pass CancellationToken when calling each async API");
@@ -1161,7 +1169,7 @@ namespace ServiceStack
         {
             try
             {
-                return task.Result;
+                return task.GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {

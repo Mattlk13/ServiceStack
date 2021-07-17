@@ -14,6 +14,7 @@ using ServiceStack.IO;
 using ServiceStack.Metadata;
 using ServiceStack.MiniProfiler;
 using ServiceStack.Web;
+using ServiceStack.Text;
 
 namespace ServiceStack
 {
@@ -129,9 +130,11 @@ namespace ServiceStack
         /// </summary>
         public static GistVirtualFiles GistVirtualFiles => AssertAppHost().VirtualFileSources.GetGistVirtualFiles();
 
-        public static ICacheClient Cache => TryResolve<ICacheClient>();
+        public static ICacheClient Cache => AssertAppHost().GetCacheClient();
 
-        public static MemoryCacheClient LocalCache => TryResolve<MemoryCacheClient>();
+        public static ICacheClientAsync CacheClientAsync => AssertAppHost().GetCacheClientAsync();
+
+        public static MemoryCacheClient LocalCache => AssertAppHost().GetMemoryCacheClient();
 
         /// <summary>
         /// Call to signal the completion of a ServiceStack-handled Request
@@ -214,7 +217,7 @@ namespace ServiceStack
         private static string defaultOperationNamespace;
         public static string DefaultOperationNamespace
         {
-            get => defaultOperationNamespace ?? (defaultOperationNamespace = GetDefaultNamespace());
+            get => defaultOperationNamespace ??= GetDefaultNamespace();
             set => defaultOperationNamespace = value;
         }
 
@@ -237,25 +240,24 @@ namespace ServiceStack
             return null;
         }
 
-        public static Task<object> RaiseServiceException(IRequest httpReq, object request, Exception ex)
-        {
-            return AssertAppHost().OnServiceException(httpReq, request, ex);
-        }
+        public static Task<object> RaiseServiceException(IRequest httpReq, object request, Exception ex) => 
+            AssertAppHost().OnServiceException(httpReq, request, ex);
 
-        public static Task RaiseUncaughtException(IRequest httpReq, IResponse httpRes, string operationName, Exception ex)
-        {
-            return AssertAppHost().OnUncaughtException(httpReq, httpRes, operationName, ex);
-        }
+        public static Task RaiseUncaughtException(IRequest httpReq, IResponse httpRes, string operationName, Exception ex) => 
+            AssertAppHost().OnUncaughtException(httpReq, httpRes, operationName, ex);
+
+        public static Task RaiseGatewayException(IRequest httpReq, object request, Exception ex) => 
+            AssertAppHost().OnGatewayException(httpReq, request, ex);
 
         public static async Task RaiseAndHandleException(IRequest httpReq, IResponse httpRes, string operationName, Exception ex)
         {
             if (!httpReq.Items.ContainsKey(nameof(ServiceStackHost.OnServiceException)))
-                await AssertAppHost().OnUncaughtException(httpReq, httpRes, operationName, ex);
+                await AssertAppHost().OnUncaughtException(httpReq, httpRes, operationName, ex).ConfigAwait();
 
             if (httpRes.IsClosed)
                 return;
 
-            await AssertAppHost().HandleResponseException(httpReq, httpRes, operationName, ex);
+            await AssertAppHost().HandleResponseException(httpReq, httpRes, operationName, ex).ConfigAwait();
         }
 
 #if !NETSTANDARD2_0

@@ -6,41 +6,36 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.Razor;
-using Microsoft.AspNetCore.Mvc.Razor.Internal;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.DependencyInjection;
-using ServiceStack;
 using ServiceStack.Auth;
 using ServiceStack.Caching;
 using ServiceStack.Configuration;
-using ServiceStack.Host;
 using ServiceStack.Host.Handlers;
 using ServiceStack.Html;
 using ServiceStack.IO;
 using ServiceStack.Logging;
 using ServiceStack.Messaging;
-using ServiceStack.Platforms;
 using ServiceStack.Redis;
 using ServiceStack.Script;
-using ServiceStack.VirtualPath;
 using ServiceStack.Web;
 using ServiceStack.Text;
 using ActionContext = Microsoft.AspNetCore.Mvc.ActionContext;
 
 namespace ServiceStack.Mvc
 {
-    public class RazorFormat : IPlugin, Html.IViewEngine
+    public class RazorFormat : IPlugin, Html.IViewEngine, Model.IHasStringId
     {
+        public string Id { get; set; } = Plugins.Razor;
         public static ILog log = LogManager.GetLogger(typeof(RazorFormat));
 
         public static string DefaultLayout { get; set; } = "_Layout";
@@ -90,7 +85,7 @@ namespace ServiceStack.Mvc
                 throw new Exception(ErrorMvcNotInit);
         }
 
-        public System.Web.IHttpHandler CatchAllHandler(string httpMethod, string pathInfo, string filepath)
+        public Host.IHttpHandler CatchAllHandler(string httpMethod, string pathInfo, string filepath)
         {
             var viewEngineResult = GetPageFromPathInfo(pathInfo);
 
@@ -134,7 +129,7 @@ namespace ServiceStack.Mvc
 
         public string IndexPage { get; set; } = "default";
 
-        protected virtual System.Web.IHttpHandler PageBasedRoutingHandler(string httpMethod, string pathInfo, string requestFilePath)
+        protected virtual Host.IHttpHandler PageBasedRoutingHandler(string httpMethod, string pathInfo, string requestFilePath)
         {
             var extPos = pathInfo.LastIndexOf('.');
             if (extPos >= 0 && pathInfo.Substring(extPos) != ".cshtml")
@@ -342,7 +337,7 @@ namespace ServiceStack.Mvc
                 }
             }
 
-            await RenderView(req, outputStream, viewData, viewEngineResult.View, req.GetTemplate());
+            await RenderView(req, outputStream, viewData, viewEngineResult.View, req.GetTemplate()).ConfigAwait();
 
             return true;
         }
@@ -448,9 +443,9 @@ namespace ServiceStack.Mvc
                         sw,
                         new HtmlHelperOptions());
 
-                    await view.RenderAsync(viewContext);
+                    await view.RenderAsync(viewContext).ConfigAwait();
 
-                    await sw.FlushAsync();
+                    await sw.FlushAsync().ConfigAwait();
 
                     try
                     {
@@ -471,14 +466,14 @@ namespace ServiceStack.Mvc
                 
                 req.Items[RenderException] = ex;
                 //Can't set HTTP Headers which are already written at this point
-                await req.Response.WriteErrorBody(ex);
+                await req.Response.WriteErrorBody(ex).ConfigAwait();
             }
         }
 
         public async Task<ReadOnlyMemory<char>> RenderToHtmlAsync(IView view, object model = null, string layout = null)
         {
             using var ms = MemoryStreamFactory.GetStream();
-            await WriteHtmlAsync(ms, view, model, layout);
+            await WriteHtmlAsync(ms, view, model, layout).ConfigAwait();
             return MemoryProvider.Instance.FromUtf8(ms.GetBufferAsSpan());
         }
         
@@ -515,7 +510,7 @@ namespace ServiceStack.Mvc
                     if (layout != null)
                         viewData["Layout"] = layout;
 
-                    viewData[Keywords.IRequest] = req ?? new BasicRequest { PathInfo = view.Path };
+                    viewData[Keywords.IRequest] = req ?? new Host.BasicRequest { PathInfo = view.Path };
 
                     var viewContext = new ViewContext(
                         actionContext,
@@ -525,9 +520,9 @@ namespace ServiceStack.Mvc
                         sw,
                         new HtmlHelperOptions());
 
-                    await view.RenderAsync(viewContext);
+                    await view.RenderAsync(viewContext).ConfigAwait();
 
-                    await sw.FlushAsync();
+                    await sw.FlushAsync().ConfigAwait();
 
                     try
                     {
@@ -592,12 +587,12 @@ namespace ServiceStack.Mvc
                     view = viewResult?.View ?? throw new ArgumentException("Could not find Razor Page at " + PathInfo);
                 }
 
-                await RenderView(format, req, res, view, Args);
+                await RenderView(format, req, res, view, Args).ConfigAwait();
             }
             catch (Exception ex)
             {
                 //Can't set HTTP Headers which are already written at this point
-                await req.Response.WriteErrorBody(ex);
+                await req.Response.WriteErrorBody(ex).ConfigAwait();
             }
         }
 
@@ -616,7 +611,7 @@ namespace ServiceStack.Mvc
                 var modelType = genericDef?.GetGenericArguments()[0];
                 if (modelType != null && modelType != typeof(object))
                 {
-                    model = await DeserializeHttpRequestAsync(modelType, req, req.ContentType);
+                    model = await DeserializeHttpRequestAsync(modelType, req, req.ContentType).ConfigAwait();
                     viewData = RazorFormat.CreateViewData(model);
                 }
             }
@@ -657,7 +652,7 @@ namespace ServiceStack.Mvc
                 }
             }
 
-            await format.RenderView(req, res.OutputStream, viewData, view);
+            await format.RenderView(req, res.OutputStream, viewData, view).ConfigAwait();
         }
     }
 
@@ -1024,7 +1019,7 @@ namespace ServiceStack.Mvc
                         : path
                 }
             };
-            await req.Response.WriteToResponse(req, result);
+            await req.Response.WriteToResponse(req, result).ConfigAwait();
             throw new StopExecutionException();
         }
 
@@ -1058,10 +1053,10 @@ namespace ServiceStack.Mvc
             if (!session.HasRole(role, req.TryResolve<IAuthRepository>()))
             {
                 if (redirect != null)
-                    await req.RedirectToAsync(redirect);
+                    await req.RedirectToAsync(redirect).ConfigAwait();
                         
                 var error = new HttpError(HttpStatusCode.Forbidden, message ?? ErrorMessages.InvalidRole.Localize(req));
-                await req.Response.WriteToResponse(req, error);
+                await req.Response.WriteToResponse(req, error).ConfigAwait();
                 throw new StopExecutionException();
             }
         }
@@ -1086,10 +1081,10 @@ namespace ServiceStack.Mvc
             if (!session.HasPermission(permission, req.TryResolve<IAuthRepository>()))
             {
                 if (redirect != null)
-                    await req.RedirectToAsync(redirect);
+                    await req.RedirectToAsync(redirect).ConfigAwait();
                         
                 var error = new HttpError(HttpStatusCode.Forbidden, message ?? ErrorMessages.InvalidPermission.Localize(req));
-                await req.Response.WriteToResponse(req, error);
+                await req.Response.WriteToResponse(req, error).ConfigAwait();
                 throw new StopExecutionException();
             }
         }
@@ -1185,7 +1180,7 @@ namespace ServiceStack.Mvc
         public virtual TPlugin GetPlugin<TPlugin>() where TPlugin : class, IPlugin => HostContext.AppHost.GetPlugin<TPlugin>();
 
         private IServiceStackProvider provider;
-        public virtual IServiceStackProvider ServiceStackProvider => provider ?? (provider = new ServiceStackProvider(Request));
+        public virtual IServiceStackProvider ServiceStackProvider => provider ??= new ServiceStackProvider(Request);
 
         public virtual IAppSettings AppSettings => ServiceStackProvider.AppSettings;
 
@@ -1195,35 +1190,57 @@ namespace ServiceStack.Mvc
 
         public virtual ICacheClient Cache => ServiceStackProvider.Cache;
 
+        public virtual ICacheClientAsync CacheAsync => ServiceStackProvider.CacheAsync;
+
         public virtual IDbConnection Db => ServiceStackProvider.Db;
 
         public virtual IRedisClient Redis => ServiceStackProvider.Redis;
+        
+#if NET472 || NETSTANDARD2_0
+        public virtual ValueTask<IRedisClientAsync> GetRedisAsync() => ServiceStackProvider.GetRedisAsync();
+#endif
 
         public virtual IMessageProducer MessageProducer => ServiceStackProvider.MessageProducer;
 
         public virtual IAuthRepository AuthRepository => ServiceStackProvider.AuthRepository;
+        
+        public virtual IAuthRepositoryAsync AuthRepositoryAsync => ServiceStackProvider.AuthRepositoryAsync;
 
         public virtual ISessionFactory SessionFactory => ServiceStackProvider.SessionFactory;
 
         public virtual Caching.ISession SessionBag => ServiceStackProvider.SessionBag;
+        
+        public virtual Caching.ISessionAsync SessionBagAsync => ServiceStackProvider.SessionBagAsync;
 
         public virtual bool IsAuthenticated => ServiceStackProvider.IsAuthenticated;
 
-        protected virtual IAuthSession GetSession(bool reload = false) => ServiceStackProvider.GetSession(reload);
+        public virtual IAuthSession GetSession(bool reload = false) => ServiceStackProvider.GetSession(reload);
 
-        protected virtual IAuthSession UserSession => GetSession();
+        public virtual Task<IAuthSession> GetSessionAsync(bool reload = false, CancellationToken token=default) => 
+            ServiceStackProvider.GetSessionAsync(reload, token);
 
-        protected virtual TUserSession SessionAs<TUserSession>() => ServiceStackProvider.SessionAs<TUserSession>();
+        public virtual IAuthSession UserSession => GetSession();
 
+        public virtual TUserSession SessionAs<TUserSession>() => ServiceStackProvider.SessionAs<TUserSession>();
+
+        public virtual Task<TUserSession> SessionAsAsync<TUserSession>(CancellationToken token=default) => 
+            ServiceStackProvider.SessionAsAsync<TUserSession>(token);
+
+        [Obsolete("Use SaveSessionAsync")]
         protected virtual void SaveSession(IAuthSession session, TimeSpan? expiresIn = null) => ServiceStackProvider.Request.SaveSession(session, expiresIn);
 
-        protected virtual void ClearSession() => ServiceStackProvider.ClearSession();
+        public virtual Task SaveSessionAsync(IAuthSession session, TimeSpan? expiresIn = null, CancellationToken token=default) => 
+            ServiceStackProvider.Request.SaveSessionAsync(session, expiresIn, token);
 
-        protected virtual TDependency TryResolve<TDependency>() => ServiceStackProvider.TryResolve<TDependency>();
+        public virtual void ClearSession() => ServiceStackProvider.ClearSession();
+        
+        public virtual Task ClearSessionAsync(CancellationToken token=default) => ServiceStackProvider.ClearSessionAsync(token);
 
-        protected virtual TService ResolveService<TService>() => ServiceStackProvider.ResolveService<TService>();
+        public virtual TDependency TryResolve<TDependency>() => ServiceStackProvider.TryResolve<TDependency>();
 
-        protected virtual object ForwardRequestToServiceStack(IRequest request = null) => ServiceStackProvider.Execute(request ?? ServiceStackProvider.Request);
+        public virtual TService ResolveService<TService>() => ServiceStackProvider.ResolveService<TService>();
+
+        public virtual object ForwardRequestToServiceStack(IRequest request = null) => ServiceStackProvider.Execute(request ?? ServiceStackProvider.Request);
 
         public virtual IServiceGateway Gateway => ServiceStackProvider.Gateway;
 

@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.Serialization;
 using ServiceStack.DataAnnotations;
+using ServiceStack.Model;
 
 namespace ServiceStack
 {
@@ -30,6 +31,9 @@ namespace ServiceStack
         [DataMember(Order = 14)] public string nc { get; set; }
         [DataMember(Order = 15)] public string cnonce { get; set; }
 
+        /// <summary>
+        /// Whether to convert successful Authenticated User Sessions to JWT Token in ss-tok Cookie 
+        /// </summary>
         [DataMember(Order = 16)] public bool? UseTokenCookie { get; set; }
 
         [DataMember(Order = 17)] public string AccessToken { get; set; }
@@ -204,7 +208,7 @@ namespace ServiceStack
         public ResponseStatus ResponseStatus { get; set; }
     }
 
-    [Exclude(Feature.Soap)]
+    [ExcludeMetadata]
     [DataContract]
     [Route("/event-subscribers/{Id}", "POST")]
     public class UpdateEventSubscriber : IPost, IReturn<UpdateEventSubscriberResponse>
@@ -224,7 +228,7 @@ namespace ServiceStack
         public ResponseStatus ResponseStatus { get; set; }
     }
 
-    [Exclude(Feature.Soap)]
+    [ExcludeMetadata]
     public class GetEventSubscribers : IGet, IReturn<List<Dictionary<string, string>>>
     {
         public string[] Channels { get; set; }
@@ -314,11 +318,8 @@ namespace ServiceStack
         [DataMember(Order = 3)] public ResponseStatus ResponseStatus { get; set; }
     }
 
-    [ExcludeMetadata]
-    [Route("/metadata/nav", "GET")]
-    [Route("/metadata/nav/{Name}", "GET")]
     [DataContract]
-    public class GetNavItems : IReturn<GetNavItemsResponse>
+    public partial class GetNavItems : IReturn<GetNavItemsResponse>
     {
         [DataMember(Order = 1)]
         public string Name { get; set; }
@@ -338,6 +339,9 @@ namespace ServiceStack
         [DataMember(Order = 5)]
         public ResponseStatus ResponseStatus { get; set; }
     }
+
+    [DataContract]
+    public partial class MetadataApp { }
 
     [DataContract]
     public class GetFile : IReturn<FileContent>, IGet
@@ -440,4 +444,249 @@ namespace ServiceStack
         [DataMember(Order = 1)]
         public Dictionary<string, string> Params { get; set; }
     }
+    
+    //Validation Rules
+    [DataContract]
+    public class GetValidationRules : IReturn<GetValidationRulesResponse>
+    {
+        [DataMember(Order = 1)]
+        public string AuthSecret { get; set; }
+        [DataMember(Order = 2)]
+        public string Type { get; set; }
+    }
+    [DataContract]
+    public class GetValidationRulesResponse
+    {
+        [DataMember(Order = 1)]
+        public List<ValidationRule> Results { get; set; }
+        [DataMember(Order = 2)]
+        public ResponseStatus ResponseStatus { get; set; }
+    }
+    [DataContract]
+    public class ModifyValidationRules : IReturnVoid
+    {
+        [DataMember(Order = 1)]
+        public string AuthSecret { get; set; }
+        [DataMember(Order = 2)]
+        public List<ValidationRule> SaveRules { get; set; }
+
+        [DataMember(Order = 3)]
+        public int[] DeleteRuleIds { get; set; }
+
+        [DataMember(Order = 4)]
+        public int[] SuspendRuleIds { get; set; }
+
+        [DataMember(Order = 5)]
+        public int[] UnsuspendRuleIds { get; set; }
+        
+        [DataMember(Order = 6)]
+        public bool? ClearCache { get; set; }
+    }
+    
+    //CrudEvents
+    [DataContract]
+    public partial class GetCrudEvents : QueryDb<CrudEvent>
+    {
+        [DataMember(Order = 1)]
+        public string AuthSecret { get; set; }
+        [DataMember(Order = 2)]
+        public string Model { get; set; }
+        [DataMember(Order = 3)]
+        public string ModelId { get; set; }
+    }
+
+    [DataContract]
+    public partial class CheckCrudEvents : IReturn<CheckCrudEventsResponse>
+    {
+        [DataMember(Order = 1)]
+        public string AuthSecret { get; set; }
+        [DataMember(Order = 2)]
+        public string Model { get; set; }
+        [DataMember(Order = 3)]
+        public List<string> Ids { get; set; }
+    }
+    
+    [DataContract]
+    public class CheckCrudEventsResponse : IHasResponseStatus
+    {
+        [DataMember(Order = 1)]
+        public List<string> Results { get; set; }
+
+        [DataMember(Order = 2)]
+        public ResponseStatus ResponseStatus { get; set; }
+    }
+
+    /// <summary>
+    /// Capture a CRUD Event
+    /// </summary>
+    [DataContract]
+    public class CrudEvent : IMeta
+    {
+        [AutoIncrement]
+        [DataMember(Order = 1)]
+        public long Id { get; set; }
+        /// <summary>
+        /// AutoCrudOperation, e.g. Create, Update, Patch, Delete, Save
+        /// </summary>
+        [DataMember(Order = 2)]
+        public string EventType { get; set; }
+        /// <summary>
+        /// DB Model
+        /// </summary>
+        [Index]
+        [DataMember(Order = 3)]
+        public string Model { get; set; }
+        /// <summary>
+        /// Primary Key of DB Model
+        /// </summary>
+        [Index]
+        [DataMember(Order = 4)]
+        public string ModelId { get; set; }
+        /// <summary>
+        /// Date of Event (UTC)
+        /// </summary>
+        [DataMember(Order = 5)]
+        public DateTime EventDate { get; set; }
+        /// <summary>
+        /// Rows Updated if available
+        /// </summary>
+        [DataMember(Order = 6)]
+        public long? RowsUpdated { get; set; }
+        /// <summary>
+        /// Request DTO Type
+        /// </summary>
+        [DataMember(Order = 7)]
+        public string RequestType { get; set; }
+        /// <summary>
+        /// Serialized Request Body
+        /// </summary>
+        [DataMember(Order = 8)]
+        public string RequestBody { get; set; }
+        /// <summary>
+        /// UserAuthId if Authenticated
+        /// </summary>
+        [DataMember(Order = 9)]
+        public string UserAuthId { get; set; }
+        /// <summary>
+        /// UserName or unique User Identifier
+        /// </summary>
+        [DataMember(Order = 10)]
+        public string UserAuthName { get; set; }
+        /// <summary>
+        /// 
+        /// </summary>
+        [DataMember(Order = 11)]
+        public string RemoteIp { get; set; }
+        /// <summary>
+        /// URN format: urn:{requesttype}:{ModelId}
+        /// </summary>
+        [DataMember(Order = 12)]
+        public string Urn { get; set; }
+
+        /// <summary>
+        /// Custom Reference Data with integer Primary Key
+        /// </summary>
+        [DataMember(Order = 13)]
+        public int? RefId { get; set; }
+        /// <summary>
+        /// Custom Reference Data with non-integer Primary Key
+        /// </summary>
+        [DataMember(Order = 14)]
+        public string RefIdStr { get; set; }
+        /// <summary>
+        /// Custom Metadata to attach to this event
+        /// </summary>
+        [DataMember(Order = 15)]
+        public Dictionary<string, string> Meta { get; set; }
+    }
+
+    [DataContract]
+    public abstract class AdminUserBase : IMeta
+    {
+        [DataMember(Order = 1)] public string UserName { get; set; }
+        [DataMember(Order = 2)] public string FirstName { get; set; }
+        [DataMember(Order = 3)] public string LastName { get; set; }
+        [DataMember(Order = 4)] public string DisplayName { get; set; }
+        [DataMember(Order = 5)] public string Email { get; set; }
+        [DataMember(Order = 6)] public string Password { get; set; }
+        [DataMember(Order = 7)] public string ProfileUrl { get; set; }
+        [DataMember(Order = 8)] public Dictionary<string, string> UserAuthProperties { get; set; }
+        [DataMember(Order = 9)] public Dictionary<string, string> Meta { get; set; }
+    }
+    
+    [DataContract]
+    public partial class AdminCreateUser : AdminUserBase, IPost, IReturn<AdminUserResponse>
+    {
+        [DataMember(Order = 10)] public List<string> Roles { get; set; }
+        [DataMember(Order = 11)] public List<string> Permissions { get; set; }
+    }
+    
+    [DataContract]
+    public partial class AdminUpdateUser : AdminUserBase, IPut, IReturn<AdminUserResponse>
+    {
+        [DataMember(Order = 10)] public string Id { get; set; }
+        [DataMember(Order = 11)] public bool? LockUser { get; set; }
+        [DataMember(Order = 12)] public bool? UnlockUser { get; set; }
+        [DataMember(Order = 13)] public List<string> AddRoles { get; set; }
+        [DataMember(Order = 14)] public List<string> RemoveRoles { get; set; }
+        [DataMember(Order = 15)] public List<string> AddPermissions { get; set; }
+        [DataMember(Order = 16)] public List<string> RemovePermissions { get; set; }
+    }
+    
+    [DataContract]
+    public partial class AdminGetUser : IGet, IReturn<AdminUserResponse>
+    {
+        [DataMember(Order = 10)] public string Id { get; set; }
+    }
+    
+    [DataContract]
+    public partial class AdminDeleteUser : IDelete, IReturn<AdminDeleteUserResponse>
+    {
+        [DataMember(Order = 10)] public string Id { get; set; }
+    }
+
+    [DataContract]
+    public class AdminDeleteUserResponse : IHasResponseStatus
+    {
+        [DataMember(Order = 1)] public string Id { get; set; }
+        [DataMember(Order = 2)] public ResponseStatus ResponseStatus { get; set; }
+    }
+
+    [DataContract]
+    public partial class AdminUserResponse : IHasResponseStatus
+    {
+        [DataMember(Order = 1)] public string Id { get; set; }
+        [DataMember(Order = 2)] public Dictionary<string,object> Result { get; set; }
+        [DataMember(Order = 3)] public ResponseStatus ResponseStatus { get; set; }
+    }
+    
+    [DataContract]
+    public partial class AdminQueryUsers : IGet, IReturn<AdminUsersResponse>
+    {
+        [DataMember(Order = 1)] public string Query { get; set; }
+        [DataMember(Order = 2)] public string OrderBy { get; set; }
+        [DataMember(Order = 3)] public int? Skip { get; set; }
+        [DataMember(Order = 4)] public int? Take { get; set; }
+    }
+
+    [DataContract]
+    public class AdminUsersResponse : IHasResponseStatus
+    {
+        [DataMember(Order = 1)] public List<Dictionary<string,object>> Results { get; set; }
+        [DataMember(Order = 2)] public ResponseStatus ResponseStatus { get; set; }
+    }
+
+/* Allow metadata discovery & code-gen in *.Source.csproj builds */    
+#if !SOURCE
+    [ExcludeMetadata] public partial class GetNavItems {}
+    [ExcludeMetadata] public partial class MetadataApp { }
+    [ExcludeMetadata] public partial class GetCrudEvents {}
+    [ExcludeMetadata] public partial class CheckCrudEvents {}
+    [ExcludeMetadata] public partial class AdminCreateUser {}
+    [ExcludeMetadata] public partial class AdminUpdateUser {}
+    [ExcludeMetadata] public partial class AdminGetUser {}
+    [ExcludeMetadata] public partial class AdminDeleteUser {}
+    [ExcludeMetadata] public partial class AdminQueryUsers {}
+#endif
+    
 }

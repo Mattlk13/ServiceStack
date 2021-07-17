@@ -81,8 +81,9 @@ namespace ServiceStack
     }
 
     [Priority(10)]
-    public class GrpcFeature : IPlugin, IPostInitPlugin
+    public class GrpcFeature : IPlugin, IPostInitPlugin, Model.IHasStringId
     {
+        public string Id { get; set; } = Plugins.Grpc;
         public string ServicesName { get; set; } = "GrpcServices";
         public Type GrpcServicesBaseType { get; set; } = typeof(GrpcServiceBase);
         
@@ -178,6 +179,9 @@ namespace ServiceStack
                     ((ServiceStackHost)appHost).Container.RegisterAutoWiredType(serviceType);
                 }
             }
+
+            appHost.GetPlugin<MetadataFeature>()
+                .AddPluginLink("types/proto", "gRPC .proto APIs");
         }
 
         public void AfterPluginsLoaded(IAppHost appHost)
@@ -331,10 +335,18 @@ namespace ServiceStack
                         }
                         else
                         {
-                            var anyMethods = GenerateMethodsForAny(op.RequestType);
-                            if (!anyMethods.IsEmpty())
+                            var crudMethod = AutoCrudOperation.ToHttpMethod(op.RequestType);
+                            if (crudMethod != null)
                             {
-                                methods.AddRange(anyMethods);
+                                methods.Add(crudMethod);
+                            }
+                            else
+                            {
+                                var anyMethods = GenerateMethodsForAny(op.RequestType);
+                                if (!anyMethods.IsEmpty())
+                                {
+                                    methods.AddRange(anyMethods);
+                                }
                             }
                         }
                     }
@@ -435,7 +447,7 @@ namespace ServiceStack
         }
     }
     
-    [Exclude(Feature.Soap)]
+    [ExcludeMetadata]
     [Route("/types/proto")]
     public class TypesProto : NativeTypesBase { }
 
@@ -461,7 +473,7 @@ namespace ServiceStack
     [Restrict(VisibilityTo = RequestAttributes.Grpc)]
     public class StreamFileService : Service, IStreamService<StreamFiles,FileContent>
     {
-        public async IAsyncEnumerable<FileContent> Stream(StreamFiles request, CancellationToken cancel = default)
+        public async IAsyncEnumerable<FileContent> Stream(StreamFiles request, [EnumeratorCancellation] CancellationToken cancel = default)
         {
             var i = 0;
             var paths = request.Paths ?? TypeConstants.EmptyStringList;
@@ -523,14 +535,13 @@ namespace ServiceStack
                 Request.QueryString["channels"] = string.Join(",", request.Channels);
 
             var handler = new ServerEventsHandler();
-            await handler.ProcessRequestAsync(Request, Request.Response, nameof(StreamServerEvents));
+            await handler.ProcessRequestAsync(Request, Request.Response, nameof(StreamServerEvents)).ConfigAwait();
 
             var res = (GrpcResponse) Request.Response;
 
             //ensure response is cancelled after stream is cancelled 
             using var deferResponse = new Defer(() => res.Close());
 
-            int i = 0;
             while (!cancel.IsCancellationRequested)
             {
                 var frame = await res.EventsChannel.Reader.ReadAsync(cancel);

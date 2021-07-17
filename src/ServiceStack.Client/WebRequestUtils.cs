@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Text;
 using ServiceStack.Text;
@@ -85,33 +86,29 @@ namespace ServiceStack
             // now go through each part, splitting on first = character, and removing leading and trailing spaces and " quotes
             for (int i = 0; i < maxnewpars; i++)
             {
-                int pos2 = newpars[i].IndexOf("=", StringComparison.Ordinal);
-                string name = newpars[i].Substring(0, pos2).Trim();
-                string value = newpars[i].Substring(pos2 + 1).Trim();
+                var pos2 = newpars[i].IndexOf("=", StringComparison.Ordinal);
+                if (pos2 == -1)
+                    return;
+                var name = newpars[i].Substring(0, pos2).Trim();
+                var value = newpars[i].Substring(pos2 + 1).Trim();
                 if (value.StartsWith("\""))
-                {
                     value = value.Substring(1);
-                }
                 if (value.EndsWith("\""))
-                {
                     value = value.Substring(0, value.Length - 1);
-                }
-
-                if ("qop".Equals(name))
+                switch (name)
                 {
-                    qop = value;
-                }
-                else if ("realm".Equals(name))
-                {
-                    realm = value;
-                }
-                else if ("nonce".Equals(name))
-                {
-                    nonce = value;
-                }
-                else if ("opaque".Equals(name))
-                {
-                    opaque = value;
+                    case "qop":
+                        qop = value;
+                        break;
+                    case "realm":
+                        realm = value;
+                        break;
+                    case "nonce":
+                        nonce = value;
+                        break;
+                    case "opaque":
+                        opaque = value;
+                        break;
                 }
             }
         }
@@ -129,7 +126,7 @@ namespace ServiceStack
             if (uri.StartsWith("https"))
             {
                 return new AuthenticationException(
-                    "Invalid remote SSL certificate, overide with: \nServicePointManager.ServerCertificateValidationCallback += ((sender, certificate, chain, sslPolicyErrors) => isValidPolicy);", ex);
+                    "Invalid remote SSL certificate, override with: \nServicePointManager.ServerCertificateValidationCallback += ((sender, certificate, chain, sslPolicyErrors) => isValidPolicy);", ex);
             }
             return null;
         }
@@ -216,7 +213,7 @@ namespace ServiceStack
             // See Client Request at http://en.wikipedia.org/wiki/Digest_access_authentication
 
             string ncUse = padNC(authInfo.nc);
-            authInfo.nc++; // incrememnt for subsequent requests
+            authInfo.nc++; // increment for subsequent requests
 
             string ha1raw = userName + ":" + authInfo.realm + ":" + password;
             string ha1 = CalculateMD5Hash(ha1raw);
@@ -318,5 +315,37 @@ namespace ServiceStack
             var statusGetter = TypeProperties.Get(response.GetType()).GetPublicGetter(nameof(ResponseStatus));
             return statusGetter?.Invoke(response) as ResponseStatus;
         }
+        
+        public static HttpWebRequest InitWebRequest(string url, string method="GET", Dictionary<string,string> headers=null)
+        {
+            var webReq = (HttpWebRequest) WebRequest.Create(url);
+            if (method != null)
+                webReq.Method = method;
+            if (headers != null)
+            {
+                foreach (var key in headers.Keys)
+                {
+                    var keyLower = key.ToLower();
+                    var value = headers[key];
+                    switch (keyLower)
+                    {
+                        case "content-type":
+                            webReq.ContentType = value;
+                            break;
+                        case "user-agent":
+                            webReq.UserAgent = value;
+                            break;
+                        case "accept":
+                            webReq.Accept = value;
+                            break;
+                        default:
+                            webReq.Headers[key] = value;
+                            break;
+                    }
+                }
+            }
+            return webReq;
+        }
+        
     }
 }

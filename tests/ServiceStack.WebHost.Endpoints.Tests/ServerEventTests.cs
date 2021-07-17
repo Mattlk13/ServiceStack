@@ -5,9 +5,6 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Funq;
-#if !NETCORE_SUPPORT
-using MySql.Data.MySqlClient.Memcached;
-#endif
 using NUnit.Framework;
 using ServiceStack.Auth;
 using ServiceStack.Configuration;
@@ -212,7 +209,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
 
     public class CustomCredentialsAuthProvider : CredentialsAuthProvider
     {
-        public override bool TryAuthenticate(IServiceBase authService, string userName, string password)
+        public override async Task<bool> TryAuthenticateAsync(IServiceBase authService, string userName, string password, CancellationToken token=default)
         {
             return userName == "user" && password == "pass";
         }
@@ -265,39 +262,6 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             return new ServerEventsAppHost { UseRedisServerEvents = true, UseAsync = true }
                 .Init()
                 .Start(Config.AbsoluteBaseUri);
-        }
-    }
-
-    public class ServerEventsErrorHandlingTests
-    {
-        private readonly ServiceStackHost appHost;
-
-        public ServerEventsErrorHandlingTests()
-        {
-            appHost = new ServerEventsAppHost().Init();
-            appHost.GetPlugin<ServerEventsFeature>().OnInit = req =>
-                throw new Exception("Always throws");
-                
-                appHost.Start(Config.AbsoluteBaseUri);
-        }
-
-        [OneTimeTearDown]
-        public void OneTimeTearDown() => appHost.Dispose();
-
-        [Test]
-        public async Task Does_dispose_SSE_Connection_when_Exception_in_OnInit_handler()
-        {
-            using (var client = new ServerEventsClient(Config.AbsoluteBaseUri))
-            {
-                try
-                {
-                    await client.Connect();
-                }
-                catch (WebException e)
-                {
-                    Assert.That(e.GetStatus(), Is.EqualTo(HttpStatusCode.InternalServerError));
-                }
-            }
         }
     }
 

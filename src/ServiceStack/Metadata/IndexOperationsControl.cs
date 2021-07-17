@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
-using System.Web.UI;
 using ServiceStack.Host;
 using ServiceStack.Text;
 using ServiceStack.Web;
@@ -32,14 +32,16 @@ namespace ServiceStack.Metadata
             var icons = CreateIcons(op);
 
             var opTemplate = StringBuilderCache.Allocate();
-            opTemplate.Append("<tr><th>" + icons + "{0}</th>");
+            opTemplate.Append($"<tr><th data-tags=\"" + 
+                op.Tags.Map(x => x.Name).Join(",") + 
+                "\">" + icons + "{0}</th>");
             foreach (var config in MetadataConfig.AvailableFormatConfigs)
             {
                 var uri = baseUrl.CombineWith(config.DefaultMetadataUri);
                 if (MetadataConfig.IsVisible(Request, config.Format.ToFormat(), operationName))
                 {
                     show = true;
-                    opTemplate.Append($@"<td><a href=""{uri}?op={{0}}"">{config.Name.UrlEncode()}</a></td>");
+                    opTemplate.Append($@"<td><a href=""{uri}?op={{0}}"">{config.Name}</a></td>");
                 }
                 else
                 {

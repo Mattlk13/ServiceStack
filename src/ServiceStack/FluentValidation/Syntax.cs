@@ -1,5 +1,5 @@
 #region License
-// Copyright (c) Jeremy Skinner (http://www.jeremyskinner.co.uk)
+// Copyright (c) .NET Foundation and contributors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// The latest version of this file can be found at https://github.com/jeremyskinner/FluentValidation
+// The latest version of this file can be found at https://github.com/FluentValidation/FluentValidation
 #endregion
 
 namespace ServiceStack.FluentValidation {
@@ -28,6 +28,15 @@ namespace ServiceStack.FluentValidation {
 	/// <typeparam name="T"></typeparam>
 	/// <typeparam name="TProperty"></typeparam>
 	public interface IRuleBuilderInitial<T, out TProperty> : IRuleBuilder<T, TProperty>, IConfigurable<PropertyRule, IRuleBuilderInitial<T, TProperty>> {
+
+		/// <summary>
+		/// Transforms the property value before validation occurs.
+		/// </summary>
+		/// <typeparam name="TNew"></typeparam>
+		/// <param name="transformationFunc"></param>
+		/// <returns></returns>
+		[Obsolete("Use Transform(x => x.Property, transformer) at the root level instead. This method will be removed in FluentValidation 10.")]
+		IRuleBuilderInitial<T, TNew> Transform<TNew>(Func<TProperty, TNew> transformationFunc);
 	}
 
 	/// <summary>
@@ -57,6 +66,14 @@ namespace ServiceStack.FluentValidation {
 		/// <param name="ruleSets"></param>
 		IRuleBuilderOptions<T, TProperty> SetValidator<TValidator>(Func<T, TValidator> validatorProvider, params string[] ruleSets)
 			where TValidator : IValidator<TProperty>;
+
+		/// <summary>
+		/// Associates a validator provider with the current property rule.
+		/// </summary>
+		/// <param name="validatorProvider">The validator provider to use</param>
+		/// <param name="ruleSets"></param>
+		IRuleBuilderOptions<T, TProperty> SetValidator<TValidator>(Func<T, TProperty, TValidator> validatorProvider, params string[] ruleSets)
+			where TValidator : IValidator<TProperty>;
 	}
 
 
@@ -73,7 +90,15 @@ namespace ServiceStack.FluentValidation {
 	/// </summary>
 	/// <typeparam name="T"></typeparam>
 	/// <typeparam name="TElement"></typeparam>
-	public interface IRuleBuilderInitialCollection<T, TElement> : IRuleBuilder<T, TElement>, IConfigurable<CollectionPropertyRule<TElement>, IRuleBuilderInitialCollection<T, TElement>> {
+	public interface IRuleBuilderInitialCollection<T, TElement> : IRuleBuilder<T, TElement>, IConfigurable<CollectionPropertyRule<T, TElement>, IRuleBuilderInitialCollection<T, TElement>> {
+
+		/// <summary>
+		/// Transforms the collection element value before validation occurs.
+		/// </summary>
+		/// <param name="transformationFunc"></param>
+		/// <returns></returns>
+		[Obsolete("Use TransformForEach(x => x.Property, transformer) at the root level instead. This method will be removed in FluentValidation 10.")]
+		IRuleBuilderInitial<T, TNew> Transform<TNew>(Func<TElement, TNew> transformationFunc);
 	}
 
 	/// <summary>

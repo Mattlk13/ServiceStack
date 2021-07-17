@@ -9,10 +9,12 @@ using ServiceStack.Web;
 
 namespace ServiceStack
 {
-    public class HttpCacheFeature : IPlugin
+    public class HttpCacheFeature : IPlugin, Model.IHasStringId
     {
+        public string Id { get; set; } = Plugins.HttpCache;
         public TimeSpan DefaultMaxAge { get; set; }
         public TimeSpan DefaultExpiresIn { get; set; }
+        public bool DisableCaching { get; set; }
 
         public Func<string, string> CacheControlFilter { get; set; }
 
@@ -32,7 +34,7 @@ namespace ServiceStack
 
         public async Task HandleCacheResponses(IRequest req, IResponse res, object response)
         {
-            if (req.IsInProcessRequest())
+            if (req.IsInProcessRequest() || DisableCaching)
                 return;
 
             if (response is Exception || res.StatusCode >= 300)
@@ -98,13 +100,12 @@ namespace ServiceStack
             var responseBytes = dto as byte[];
             if (responseBytes == null)
             {
-                if (dto is string rawStr)
-                    responseBytes = rawStr.ToUtf8Bytes();
-                else
-                {
-                    if (dto is Stream stream)
-                        responseBytes = stream.ReadFully();
-                }
+                responseBytes = dto switch {
+                    string rawStr => rawStr.ToUtf8Bytes(),
+                    MemoryStream ms => await ms.ReadFullyAsync().ConfigAwait(),
+                    Stream stream => await stream.ReadFullyAsync().ConfigAwait(),
+                    _ => responseBytes
+                };
             }
 
             var encoding = !cacheInfo.NoCompression

@@ -471,6 +471,11 @@ namespace ServiceStack
                 : safeVarName;
         }
 
+        public static string RemoveSuffix(string name, string suffix) => name == null ? null :
+            name.EndsWith(suffix)
+                ? name.Substring(0, name.Length - suffix.Length)
+                : name;
+
         static readonly Regex StripHtmlUnicodeRegEx =
             new Regex(@"&(#)?([xX])?([^ \f\n\r\t\v;]+);", RegexOptions.Compiled);
 
@@ -536,6 +541,21 @@ namespace ServiceStack
             return Convert.ToString(Convert.ToChar(codePoint), CultureInfo.InvariantCulture);
         }
 
+        private static readonly char[] FieldSeparators = {',', ';'};
+        public static string[] SplitVarNames(string fields)
+        {
+            if (string.IsNullOrEmpty(fields))
+                return TypeConstants.EmptyStringArray;
+
+            var sanitizedFields = fields.Trim().TrimEnd(FieldSeparators);
+            if (string.IsNullOrEmpty(sanitizedFields))
+                return TypeConstants.EmptyStringArray;
+            
+            return sanitizedFields
+                .Split(FieldSeparators, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim()).ToArray();
+        }
+
         public static List<string> SplitGenericArgs(string argList)
         {
             var to = new List<string>();
@@ -579,14 +599,18 @@ namespace ServiceStack
             return to;
         }
 
-        static char[] blockChars = new[] { '<', '>' };
-        public static TextNode ParseTypeIntoNodes(this string typeDef)
+        static readonly char[] csharpGenericDelimChars = { '<', '>' };
+        public static TextNode ParseTypeIntoNodes(this string typeDef) => typeDef.ParseTypeIntoNodes(csharpGenericDelimChars);
+        public static TextNode ParseTypeIntoNodes(this string typeDef, char[] genericDelimChars)
         {
             if (string.IsNullOrEmpty(typeDef))
                 return null;
 
+            var openDelim = genericDelimChars[0];
+            var openDelimStr = openDelim.ToString();
+
             var node = new TextNode();
-            var lastBlockPos = typeDef.IndexOf('<');
+            var lastBlockPos = typeDef.IndexOf(openDelim);
 
             if (lastBlockPos >= 0)
             {
@@ -595,15 +619,15 @@ namespace ServiceStack
                 var blockStartingPos = new Stack<int>();
                 blockStartingPos.Push(lastBlockPos);
 
-                while (lastBlockPos != -1 || blockStartingPos.Count == 0)
+                while (true)
                 {
-                    var nextPos = typeDef.IndexOfAny(blockChars, lastBlockPos + 1);
+                    var nextPos = typeDef.IndexOfAny(genericDelimChars, lastBlockPos + 1);
                     if (nextPos == -1)
                         break;
 
                     var blockChar = typeDef.Substring(nextPos, 1);
 
-                    if (blockChar == "<")
+                    if (blockChar == openDelimStr)
                     {
                         blockStartingPos.Push(nextPos);
                     }
@@ -618,9 +642,9 @@ namespace ServiceStack
                             var args = SplitGenericArgs(childBlock);
                             foreach (var arg in args)
                             {
-                                if (arg.IndexOfAny(blockChars) >= 0)
+                                if (arg.IndexOfAny(genericDelimChars) >= 0)
                                 {
-                                    var childNode = ParseTypeIntoNodes(arg);
+                                    var childNode = ParseTypeIntoNodes(arg, genericDelimChars);
                                     if (childNode != null)
                                     {
                                         node.Children.Add(childNode);

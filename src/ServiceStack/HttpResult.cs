@@ -1,4 +1,3 @@
-#if !SL5
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -188,7 +187,7 @@ namespace ServiceStack
 
         public void SetSessionCookie(string name, string value, string path)
         {
-            path = path ?? "/";
+            path ??= "/";
             this.Headers[HttpHeaders.SetCookie] = $"{name}={value};path={path}";
         }
 
@@ -200,7 +199,7 @@ namespace ServiceStack
 
         public void SetCookie(string name, string value, DateTime expiresAt, string path, bool secure = false, bool httpOnly = false)
         {
-            path = path ?? "/";
+            path ??= "/";
             var cookie = $"{name}={value};expires={expiresAt:R};path={path}";
             if (secure)
                 cookie += ";Secure";
@@ -260,11 +259,9 @@ namespace ServiceStack
             {
                 response?.SetContentLength(FileInfo.Length + paddingLength);
 
-                using (var fs = this.FileInfo.OpenRead())
-                {
-                    await fs.CopyToAsync(responseStream, token);
-                    return;
-                }
+                using var fs = this.FileInfo.OpenRead();
+                await fs.CopyToAsync(responseStream, token);
+                return;
             }
 
             if (this.ResponseStream != null)
@@ -343,10 +340,8 @@ namespace ServiceStack
             var outputStream = response.OutputStream;
             if (FileInfo != null)
             {
-                using (var fs = FileInfo.OpenRead())
-                {
-                    await fs.WritePartialToAsync(outputStream, rangeStart, rangeEnd, token);
-                }
+                using var fs = FileInfo.OpenRead();
+                await fs.WritePartialToAsync(outputStream, rangeStart, rangeEnd, token);
             }
             else if (ResponseStream != null)
             {
@@ -361,10 +356,8 @@ namespace ServiceStack
             }
             else if (ResponseText != null)
             {
-                using (var ms = MemoryStreamFactory.GetStream(Encoding.UTF8.GetBytes(ResponseText)))
-                {
-                    await ms.WritePartialToAsync(outputStream, rangeStart, rangeEnd, token);
-                }
+                using var ms = MemoryStreamFactory.GetStream(Encoding.UTF8.GetBytes(ResponseText));
+                await ms.WritePartialToAsync(outputStream, rangeStart, rangeEnd, token);
             }
             else
                 throw new InvalidOperationException("Neither file, stream nor text were set when attempting to write to the Response Stream.");
@@ -480,9 +473,9 @@ namespace ServiceStack
         ProxyRevalidate = 1 << 6,
     }
 
-#if !NETSTANDARD2_0
     public static class HttpResultExtensions
     {
+#if !NETSTANDARD2_0
         public static System.Net.Cookie ToCookie(this HttpCookie httpCookie)
         {
             var to = new System.Net.Cookie(httpCookie.Name, httpCookie.Value, httpCookie.Path)
@@ -497,8 +490,16 @@ namespace ServiceStack
 
             return to;
         }
-    }
 #endif
 
+        public static IHttpResult AddCookie(this IHttpResult httpResult, IRequest req, Cookie cookie)
+        {
+            var appHost = HostContext.AppHost;
+            if (appHost == null || appHost.SetCookieFilter(req, cookie))
+                httpResult.Cookies.Add(cookie);
+            return httpResult;
+        }
+        
+    }
+
 }
-#endif

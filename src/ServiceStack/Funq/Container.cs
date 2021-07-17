@@ -183,7 +183,7 @@ namespace Funq
             var entry = GetEntry<TService, Func<Container, TService>>(name, throwIfMissing);
             // Return default if not registered and didn't throw above.
             if (entry == null)
-                return default(TService);
+                return default;
 
             using (entry.AquireLockIfNeeded())
             {
@@ -192,6 +192,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container);
                         entry.InitializeInstance(instance);
                     }
@@ -220,6 +222,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg);
                         entry.InitializeInstance(instance);
                     }
@@ -248,6 +252,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg1, arg2);
                         entry.InitializeInstance(instance);
                     }
@@ -276,6 +282,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg1, arg2, arg3);
                         entry.InitializeInstance(instance);
                     }
@@ -304,6 +312,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg1, arg2, arg3, arg4);
                         entry.InitializeInstance(instance);
                     }
@@ -332,6 +342,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg1, arg2, arg3, arg4, arg5);
                         entry.InitializeInstance(instance);
                     }
@@ -360,6 +372,8 @@ namespace Funq
                 {
                     try
                     {
+                        if (entry.Factory == null)
+                            return default;
                         instance = entry.Factory(entry.Container, arg1, arg2, arg3, arg4, arg5, arg6);
                         entry.InitializeInstance(instance);
                     }
@@ -380,7 +394,7 @@ namespace Funq
         }
 
         public bool CheckAdapterFirst { get; set; }
-
+        
         protected virtual ServiceEntry<TService, TFunc> GetEntry<TService, TFunc>(string serviceName, bool throwIfMissing)
         {
             try
@@ -461,7 +475,7 @@ namespace Funq
                         {
                             //Container.Exists<> needs to return null if no dependency exists
                             var instance = Adapter.TryResolve<TService>();
-                            if (instance == null)
+                            if (instance == null || (typeof(TService).IsValueType && default(TService)?.Equals(instance) == true))
                                 return null;
 
                             return new ServiceEntry<TService, TFunc>(

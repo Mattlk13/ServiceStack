@@ -389,7 +389,7 @@ namespace ServiceStack.Razor
         }
 
         private IServiceGateway gateway;
-        public virtual IServiceGateway Gateway => gateway ?? (gateway = HostContext.AppHost.GetServiceGateway(Request));
+        public virtual IServiceGateway Gateway => gateway ??= HostContext.AppHost.GetServiceGateway(Request);
 
         public bool IsError => ModelError != null || GetErrorStatus() != null;
 
@@ -400,19 +400,25 @@ namespace ServiceStack.Razor
         public IVirtualPathProvider VirtualFileSources => HostContext.VirtualFileSources;
 
         private ICacheClient cache;
-        public ICacheClient Cache => cache ?? (cache = HostContext.AppHost.GetCacheClient(Request));
+        public ICacheClient Cache => cache ??= HostContext.AppHost.GetCacheClient(Request);
+
+        private ICacheClientAsync cacheAsync;
+        public ICacheClientAsync CacheAsync => cacheAsync ??= HostContext.AppHost.GetCacheClientAsync(Request);
 
         private IDbConnection db;
-        public IDbConnection Db => db ?? (db = HostContext.AppHost.GetDbConnection(Request));
+        public IDbConnection Db => db ??= HostContext.AppHost.GetDbConnection(Request);
 
         private IRedisClient redis;
-        public IRedisClient Redis => redis ?? (redis = HostContext.AppHost.GetRedisClient(Request));
+        public IRedisClient Redis => redis ??= HostContext.AppHost.GetRedisClient(Request);
 
         private IMessageProducer messageProducer;
-        public virtual IMessageProducer MessageProducer => messageProducer ?? (messageProducer = HostContext.AppHost.GetMessageProducer(Request));
+        public virtual IMessageProducer MessageProducer => messageProducer ??= HostContext.AppHost.GetMessageProducer(Request);
 
         private IAuthRepository authRepository;
-        public IAuthRepository AuthRepository => authRepository ?? (authRepository = HostContext.AppHost.GetAuthRepository(Request));
+        public IAuthRepository AuthRepository => authRepository ??= HostContext.AppHost.GetAuthRepository(Request);
+
+        private IAuthRepositoryAsync authRepositoryAsync;
+        public IAuthRepositoryAsync AuthRepositoryAsync => authRepositoryAsync ??= HostContext.AppHost.GetAuthRepositoryAsync(Request);
 
         private ISessionFactory sessionFactory;
         private ISession session;
@@ -421,9 +427,9 @@ namespace ServiceStack.Razor
             get
             {
                 if (sessionFactory == null)
-                    sessionFactory = new SessionFactory(Cache);
+                    sessionFactory = new SessionFactory(Cache, CacheAsync);
 
-                return session ?? (session = sessionFactory.GetOrCreateSession(Request, Response));
+                return session ??= sessionFactory.GetOrCreateSession(Request, Response);
             }
         }
 
@@ -463,12 +469,6 @@ namespace ServiceStack.Razor
             catch { }
             try
             {
-                cache?.Dispose();
-                cache = null;
-            }
-            catch { }
-            try
-            {
                 db?.Dispose();
                 db = null;
             }
@@ -491,9 +491,14 @@ namespace ServiceStack.Razor
                 authRepository = null;
             }
             catch { }
-
+            try
+            {
+                using (authRepositoryAsync as IDisposable) { }
+                authRepositoryAsync = null;
+            }
+            catch { }
         }
-
+        
         public string Href(string url)
         {
             var replacedUrl = Url.Content(url);
@@ -555,11 +560,10 @@ namespace ServiceStack.Razor
         {
             if (IsAuthenticated) return;
 
-            redirectUrl = redirectUrl
-                ?? AuthenticateService.HtmlRedirect
-                ?? HostContext.Config.DefaultRedirectPath
-                ?? HostContext.Config.WebHostUrl
-                ?? "/";
+            redirectUrl ??= AuthenticateService.HtmlRedirect
+                        ?? HostContext.Config.DefaultRedirectPath
+                        ?? HostContext.Config.WebHostUrl
+                        ?? "/";
             AuthenticateAttribute.DoHtmlRedirect(redirectUrl, Request, Response, includeRedirectParam: true);
             throw new StopExecutionException();
         }

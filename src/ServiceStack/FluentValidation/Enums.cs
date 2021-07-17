@@ -1,22 +1,24 @@
 #region License
-// Copyright (c) Jeremy Skinner (http://www.jeremyskinner.co.uk)
-// 
-// Licensed under the Apache License, Version 2.0 (the "License"); 
-// you may not use this file except in compliance with the License. 
-// You may obtain a copy of the License at 
-// 
-// http://www.apache.org/licenses/LICENSE-2.0 
-// 
-// Unless required by applicable law or agreed to in writing, software 
-// distributed under the License is distributed on an "AS IS" BASIS, 
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-// See the License for the specific language governing permissions and 
+// Copyright (c) .NET Foundation and contributors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
 // limitations under the License.
-// 
-// The latest version of this file can be found at https://github.com/jeremyskinner/FluentValidation
+//
+// The latest version of this file can be found at https://github.com/FluentValidation/FluentValidation
 #endregion
 
 namespace ServiceStack.FluentValidation {
+	using System;
+
 	/// <summary>
 	/// Specifies how rules should cascade when one fails.
 	/// </summary>
@@ -28,7 +30,13 @@ namespace ServiceStack.FluentValidation {
 		/// <summary>
 		/// When a rule fails, validation is stopped and all other rules in the chain will not be executed.
 		/// </summary>
-		StopOnFirstFailure
+		[Obsolete("Use CascadeMode.Stop instead. The behaviour of StopOnFirstFailure was ambiguous when used at validator-level. For more details, see https://docs.fluentvalidation.net/en/latest/conditions.html#stop-vs-stoponfirstfailure")]
+		StopOnFirstFailure,
+
+		/// <summary>
+		/// When a rule fails, validation is immediately halted.
+		/// </summary>
+		Stop,
 	}
 
 	/// <summary>
@@ -46,7 +54,7 @@ namespace ServiceStack.FluentValidation {
 	}
 
      /// <summary>
-     /// Specifies the severity of a rule. 
+     /// Specifies the severity of a rule.
      /// </summary>
 	public enum Severity {
 		/// <summary>

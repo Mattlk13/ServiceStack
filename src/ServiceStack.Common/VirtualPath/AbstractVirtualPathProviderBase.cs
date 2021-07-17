@@ -62,7 +62,7 @@ namespace ServiceStack.VirtualPath
             return RootDirectory.GetDirectory(SanitizePath(virtualPath));
         }
 
-        public virtual IEnumerable<IVirtualFile> GetAllMatchingFiles(string globPattern, int maxDepth = Int32.MaxValue)
+        public virtual IEnumerable<IVirtualFile> GetAllMatchingFiles(string globPattern, int maxDepth = int.MaxValue)
         {
             return RootDirectory.GetAllMatchingFiles(globPattern, maxDepth);
         }
@@ -126,9 +126,16 @@ namespace ServiceStack.VirtualPath
             if (!(this is IVirtualFiles vfs))
                 throw new NotSupportedException($"{GetType().Name} does not implement IVirtualFiles");
 
-            vfs.WriteFile(path, MemoryProvider.Instance.ToMemoryStream(bytes.Span));
+            vfs.WriteFile(path, ToMemoryStream(bytes));
         }
-        
+
+        private static MemoryStream ToMemoryStream(ReadOnlyMemory<byte> bytes)
+        {
+            var ms = MemoryProvider.Instance.ToMemoryStream(bytes.Span);
+            ms.Position = 0;
+            return ms;
+        }
+
         public virtual void WriteFile(string path, object contents)
         {
             if (!(this is IVirtualFiles vfs))
@@ -171,7 +178,7 @@ namespace ServiceStack.VirtualPath
             if (!(this is IVirtualFiles vfs))
                 throw new NotSupportedException($"{GetType().Name} does not implement IVirtualFiles");
 
-            vfs.AppendFile(path, MemoryProvider.Instance.ToMemoryStream(bytes.Span));
+            vfs.AppendFile(path, ToMemoryStream(bytes));
         }
 
         public virtual void AppendFile(string path, object contents)

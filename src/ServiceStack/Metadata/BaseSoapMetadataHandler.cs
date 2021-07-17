@@ -1,9 +1,9 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
-using System.Web.UI;
 using System.Xml.Schema;
 using ServiceStack.Web;
+using ServiceStack.Text;
 
 namespace ServiceStack.Metadata
 {
@@ -48,10 +48,10 @@ namespace ServiceStack.Metadata
             else
             {
                 httpRes.ContentType = "text/html; charset=utf-8";
-                await ProcessOperationsAsync(httpRes.OutputStream, httpReq, httpRes);
+                await ProcessOperationsAsync(httpRes.OutputStream, httpReq, httpRes).ConfigAwait();
             }
 
-            await httpRes.EndHttpHandlerRequestAsync(skipHeaders:true);
+            await httpRes.EndHttpHandlerRequestAsync(skipHeaders:true).ConfigAwait();
         }
 
     }

@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
-using ServiceStack.Configuration;
 using ServiceStack.DataAnnotations;
 using ServiceStack.Host;
 using ServiceStack.Logging;
@@ -29,8 +28,7 @@ namespace ServiceStack.NativeTypes
 
         public MetadataTypesConfig GetConfig(NativeTypesBase req)
         {
-            return new MetadataTypesConfig
-            {
+            return new() {
                 BaseUrl = req.BaseUrl ?? defaults.BaseUrl,
                 MakePartial = req.MakePartial ?? defaults.MakePartial,
                 MakeVirtual = req.MakeVirtual ?? defaults.MakeVirtual,
@@ -55,19 +53,21 @@ namespace ServiceStack.NativeTypes
                 ExportAsTypes = req.ExportAsTypes ?? defaults.ExportAsTypes,
                 ExcludeImplementedInterfaces = defaults.ExcludeImplementedInterfaces,
                 AddDefaultXmlNamespace = req.AddDefaultXmlNamespace ?? defaults.AddDefaultXmlNamespace,
-                AddNamespaces = req.AddNamespaces ?? defaults.AddNamespaces,
-                DefaultNamespaces = req.DefaultNamespaces ?? defaults.DefaultNamespaces,
-                DefaultImports = req.DefaultImports ?? defaults.DefaultImports,
-                IncludeTypes = TrimArgs(req.IncludeTypes ?? defaults.IncludeTypes),
-                ExcludeTypes = TrimArgs(req.ExcludeTypes ?? defaults.ExcludeTypes),
-                TreatTypesAsStrings = TrimArgs(req.TreatTypesAsStrings ?? defaults.TreatTypesAsStrings),
+                AddNamespaces = req.AddNamespaces ?? defaults.AddNamespaces?.ToList(),
+                DefaultNamespaces = req.DefaultNamespaces ?? defaults.DefaultNamespaces?.ToList(),
+                DefaultImports = req.DefaultImports ?? defaults.DefaultImports?.ToList(),
+                IncludeTypes = TrimArgs(req.IncludeTypes ?? defaults.IncludeTypes?.ToList()),
+                ExcludeTypes = TrimArgs(req.ExcludeTypes ?? defaults.ExcludeTypes?.ToList()),
+                TreatTypesAsStrings = TrimArgs(req.TreatTypesAsStrings ?? defaults.TreatTypesAsStrings?.ToList()),
                 ExportValueTypes = req.ExportValueTypes ?? defaults.ExportValueTypes,
-                ExportAttributes = defaults.ExportAttributes,
-                ExportTypes = defaults.ExportTypes,
-                IgnoreTypes = defaults.IgnoreTypes,
-                IgnoreTypesInNamespaces = defaults.IgnoreTypesInNamespaces,
+                ExportAttributes = defaults.ExportAttributes?.ToSet(),
+                ExportTypes = defaults.ExportTypes?.ToSet(),
+                IgnoreTypes = defaults.IgnoreTypes?.ToSet(),
+                IgnoreTypesInNamespaces = defaults.IgnoreTypesInNamespaces?.ToList(),
                 GlobalNamespace = req.GlobalNamespace ?? defaults.GlobalNamespace,
-                ExcludeNamespace = req.ExcludeNamespace ?? defaults.ExcludeNamespace
+                ExcludeNamespace = req.ExcludeNamespace ?? defaults.ExcludeNamespace,
+                DataClass = req.DataClass ?? defaults.DataClass,
+                DataClassJson = req.DataClassJson ?? defaults.DataClassJson,
             };
         }
 
@@ -115,21 +115,28 @@ namespace ServiceStack.NativeTypes
             var ignoreNamespaces = config.IgnoreTypesInNamespaces ?? new List<string>();
             var exportTypes = config.ExportTypes ?? new HashSet<Type>();
 
+            bool ShouldIgnoreOperation(Operation op)
+            {
+                if (predicate != null && !predicate(op))
+                    return true;
+
+                if (!meta.IsVisible(req, op))
+                    return true;
+
+                if (skipTypes.Contains(op.RequestType))
+                    return true;
+
+                if (ignoreNamespaces.Contains(op.RequestType.Namespace))
+                    return true;
+                return false;
+            }
+
             foreach (var operation in meta.Operations)
             {
-                if (predicate != null && !predicate(operation))
-                    continue;
-
-                if (!meta.IsVisible(req, operation))
+                if (ShouldIgnoreOperation(operation)) 
                     continue;
 
                 if (opTypes.Contains(operation.RequestType))
-                    continue;
-
-                if (skipTypes.Contains(operation.RequestType))
-                    continue;
-
-                if (ignoreNamespaces.Contains(operation.RequestType.Namespace))
                     continue;
 
                 var opType = new MetadataOperationType
@@ -137,7 +144,16 @@ namespace ServiceStack.NativeTypes
                     Actions = operation.Actions,
                     Request = ToType(operation.RequestType),
                     Response = ToType(operation.ResponseType),
+                    DataModel = ToTypeName(operation.DataModelType),
+                    ViewModel = ToTypeName(operation.ViewModelType),
+                    RequiresAuth = operation.RequiresAuthentication,
+                    RequiredRoles = operation.RequiredRoles,
+                    RequiresAnyRole = operation.RequiresAnyRole,
+                    RequiredPermissions = operation.RequiredPermissions,
+                    RequiresAnyPermission = operation.RequiresAnyPermission,
+                    Tags = operation.Tags.Count > 0 ? operation.Tags.Map(x => x.Name) : null,
                 };
+                opType.Request.RequestType = opType;
                 metadata.Operations.Add(opType);
                 opTypes.Add(operation.RequestType);
 
@@ -148,15 +164,53 @@ namespace ServiceStack.NativeTypes
                         //Config.IgnoreTypesInNamespaces in CSharpGenerator
                         opType.Response = null;
                     }
-                    else
+                }
+                if (operation.RequestType.GetTypeWithInterfaceOf(typeof(IReturnVoid)) != null)
+                {
+                    opType.ReturnsVoid = true;
+                }
+                else
+                {
+                    var genericMarker = operation.RequestType != typeof(IReturn<>)
+                        ? operation.RequestType.GetTypeWithGenericTypeDefinitionOf(typeof(IReturn<>))
+                        : null;
+
+                    if (genericMarker != null)
                     {
-                        opTypes.Add(operation.ResponseType);
+                        var returnType = genericMarker.GetGenericArguments().First();
+                        opType.ReturnType = ToTypeName(returnType);
                     }
+                }
+
+                var routeAttrs = HostContext.AppHost.GetRouteAttributes(operation.RequestType).ToList();
+                if (routeAttrs.Count > 0)
+                {
+                    opType.Routes = routeAttrs.ConvertAll(x =>
+                        new MetadataRoute
+                        {
+                            RouteAttribute = x,
+                            Path = x.Path,
+                            Notes = x.Notes,
+                            Summary = x.Summary,
+                            Verbs = x.Verbs,
+                        });
+                }
+            }
+            // Add all Request Types before Response Types
+            foreach (var operation in meta.Operations)
+            {
+                if (ShouldIgnoreOperation(operation)) 
+                    continue;
+
+                if (operation.ResponseType != null)
+                {
+                    opTypes.Add(operation.ResponseType);
                 }
             }
 
             var considered = new HashSet<Type>(opTypes);
             var queue = new Queue<Type>(opTypes);
+            var registeredTypes = new HashSet<string>();
 
             bool ignoreTypeFn(Type t) => t == null 
                 || t.IsGenericParameter 
@@ -180,9 +234,16 @@ namespace ServiceStack.NativeTypes
                     queue.Enqueue(t);
                 }
 
-                if ((!(t.IsSystemType() && !t.IsTuple()) && (t.IsClass || t.IsEnum || t.IsInterface) && !t.IsGenericParameter) || exportTypes.ContainsMatch(t))
+                var typeKey = t.Namespace + "." + t.Name; //codegen-ed types have different identity, need to check on full Type Name
+                if (registeredTypes.Contains(typeKey))
+                    return;
+
+                if (!(t.IsSystemType() && !t.IsTuple())
+                    && (t.IsClass || t.IsEnum || t.IsInterface) 
+                    && !t.IsGenericParameter || exportTypes.ContainsMatch(t))
                 {
                     metadata.Types.Add(ToType(t));
+                    registeredTypes.Add(typeKey);
 
                     foreach (var ns in GetNamespacesUsed(t))
                     {
@@ -337,6 +398,34 @@ namespace ServiceStack.NativeTypes
             };
         }
 
+        public MetadataType ToFlattenedType(Type type)
+        {
+            if (type == null) 
+                return null;
+
+            MetadataType to = null;
+            do
+            {
+                var metaType = ToType(type);
+                if (to == null)
+                {
+                    to = metaType;
+                }
+                else
+                {
+                    if (metaType.Properties != null)
+                    {
+                        to.Properties ??= new List<MetadataPropertyType>();
+                        foreach (var metaProp in metaType.Properties)
+                        {
+                            to.Properties.Add(metaProp);
+                        }
+                    }
+                }
+            } while ((type = type.BaseType) != typeof(object) && type != null);
+            return to;
+        }
+
         public MetadataType ToType(Type type)
         {
             if (type == null) 
@@ -354,11 +443,11 @@ namespace ServiceStack.NativeTypes
                 Implements = ToInterfaces(type),
                 Attributes = ToAttributes(type),
                 Properties = ToProperties(type),
-                IsNested = type.IsNested ? true : (bool?)null,
-                IsEnum = type.IsEnum ? true : (bool?)null,
-                IsEnumInt = JsConfig.TreatEnumAsInteger || type.IsEnumFlags() ? true : (bool?)null,
-                IsInterface = type.IsInterface ? true : (bool?)null,
-                IsAbstract = type.IsAbstract ? true : (bool?)null,
+                IsNested = type.IsNested.NullIfFalse(),
+                IsEnum = type.IsEnum.NullIfFalse(),
+                IsEnumInt = (JsConfig.TreatEnumAsInteger || type.IsEnumFlags()).NullIfFalse(),
+                IsInterface = type.IsInterface.NullIfFalse(),
+                IsAbstract = type.IsAbstract.NullIfFalse(),
             };
 
             if (type.BaseType != null && 
@@ -368,37 +457,6 @@ namespace ServiceStack.NativeTypes
                 !type.HasInterface(typeof(IService)))
             {
                 metaType.Inherits = ToTypeName(type.BaseType);
-            }
-
-            if (type.GetTypeWithInterfaceOf(typeof(IReturnVoid)) != null)
-            {
-                metaType.ReturnVoidMarker = true;
-            }
-            else
-            {
-                var genericMarker = type != typeof(IReturn<>)
-                    ? type.GetTypeWithGenericTypeDefinitionOf(typeof(IReturn<>))
-                    : null;
-
-                if (genericMarker != null)
-                {
-                    var returnType = genericMarker.GetGenericArguments().First();
-                    metaType.ReturnMarkerTypeName = ToTypeName(returnType);
-                }
-            }
-
-            var routeAttrs = HostContext.AppHost.GetRouteAttributes(type).ToList();
-            if (routeAttrs.Count > 0)
-            {
-                metaType.Routes = routeAttrs.ConvertAll(x =>
-                    new MetadataRoute
-                    {
-                        RouteAttribute = x,
-                        Path = x.Path,
-                        Notes = x.Notes,
-                        Summary = x.Summary,
-                        Verbs = x.Verbs,
-                    });
             }
 
             metaType.Description = type.GetDescription();
@@ -495,7 +553,7 @@ namespace ServiceStack.NativeTypes
 
         private MetadataTypeName[] ToInterfaces(Type type)
         {
-            return type.GetInterfaces().Where(x => 
+            return type.GetDirectInterfaces().Where(x => 
             (!config.ExcludeImplementedInterfaces && !x.IsGenericType && !x.IsSystemType() && !x.IsServiceStackType()) 
             || config.ExportTypes.ContainsMatch(x))
             .Map(x =>
@@ -523,7 +581,8 @@ namespace ServiceStack.NativeTypes
                          !(config.ExportTypes.ContainsMatch(type) && JsConfig.TreatValueAsRefTypes.ContainsMatch(type))) 
                 || type.IsOrHasGenericInterfaceTypeOf(typeof(IEnumerable<>))
                 ? null
-                : GetInstancePublicProperties(type).Select(x => ToProperty(x)).ToList();
+                : GetInstancePublicProperties(type).Select(x => ToProperty(x))
+                    .ToList().PopulatePrimaryKey();
 
             return props == null || props.Count == 0 ? null : props;
         }
@@ -602,6 +661,26 @@ namespace ServiceStack.NativeTypes
 
         public MetadataAttribute ToMetadataAttribute(Attribute attr)
         {
+            if (attr is IReflectAttributeConverter converter)
+            {
+                var ret = converter.ToReflectAttribute();
+                if (ret != null)
+                {
+                    MetadataPropertyType metaProp(KeyValuePair<PropertyInfo, object> entry)
+                    {
+                        var to = ToProperty(entry.Key);
+                        to.Value = PropertyStringValue(entry.Key, entry.Value);
+                        return to;
+                    }
+                    
+                    return new MetadataAttribute {
+                        Name = ret.Name ?? attr.GetAttributeName(),
+                        ConstructorArgs = ret.ConstructorArgs?.Map(metaProp),
+                        Args = ret.PropertyArgs?.Map(metaProp),
+                    };
+                }
+            }
+            
             var attrType = attr.GetType();
             var firstCtor = attrType.GetConstructors()
                 //.OrderBy(x => x.GetParameters().Length)
@@ -610,7 +689,7 @@ namespace ServiceStack.NativeTypes
             var metaAttr = new MetadataAttribute
             {
                 Attribute = attr,
-                Name = attrType.Name.Replace("Attribute", ""),
+                Name = attr.GetAttributeName(),
                 ConstructorArgs = firstCtor != null
                     ? firstCtor.GetParameters().ToList().ConvertAll(ToProperty)
                     : null,
@@ -677,22 +756,21 @@ namespace ServiceStack.NativeTypes
 
         public MetadataPropertyType ToProperty(PropertyInfo pi, object instance = null, Dictionary<string, object> ignoreValues = null)
         {
-            var genericArgs = pi.PropertyType.IsGenericType
-                ? pi.PropertyType.GetGenericArguments().Select(x => x.ExpandTypeName()).ToArray()
-                : null;
-
+            var propType = pi.PropertyType;
+            var underlyingType = Nullable.GetUnderlyingType(propType) ?? propType;
             var property = new MetadataPropertyType
             {
-                PropertyType = pi.PropertyType,
+                PropertyInfo = pi,
+                PropertyType = propType,
                 Name = pi.Name,
                 Attributes = ToAttributes(pi.GetCustomAttributes(false)),
-                Type = pi.PropertyType.GetMetadataPropertyType(),
-                IsValueType = pi.PropertyType.IsValueType ? true : (bool?)null,
-                IsSystemType = pi.PropertyType.IsSystemType() ? true : (bool?)null,
-                IsEnum = pi.PropertyType.IsEnum ? true : (bool?)null,
-                TypeNamespace = pi.PropertyType.Namespace,
+                Type = propType.GetMetadataPropertyType(),
+                IsValueType = underlyingType.IsValueType.NullIfFalse(),
+                IsSystemType = underlyingType.IsSystemType().NullIfFalse(),
+                IsEnum = underlyingType.IsEnum.NullIfFalse(),
+                TypeNamespace = propType.Namespace,
                 DataMember = ToDataMember(pi.GetDataMember()),
-                GenericArgs = genericArgs,
+                GenericArgs = ToGenericArgs(propType),
                 Description = pi.GetDescription(),
             };
 
@@ -704,6 +782,21 @@ namespace ServiceStack.NativeTypes
 
                 property.ParamType = apiMember.ParameterType;
                 property.DisplayType = apiMember.DataType;
+            }
+
+            var validateProp = pi.AllAttributes<ValidateAttribute>();
+            if (validateProp.Any(x => x.Validator != null && ValidateScripts.RequiredValidators.Contains(x.Validator)))
+                property.IsRequired = true;
+
+            var requiredProp = pi.FirstAttribute<RequiredAttribute>();
+            if (requiredProp != null)
+                property.IsRequired = true;
+
+            if (HostContext.AppHost.Config.TreatNonNullableRefTypesAsRequired)
+            {
+                var notNullRefType = pi.IsNotNullable();
+                if (notNullRefType == true)
+                    property.IsRequired = true;
             }
 
             var apiAllowableValues = pi.FirstAttribute<ApiAllowableValuesAttribute>();
@@ -718,13 +811,21 @@ namespace ServiceStack.NativeTypes
             {
                 var ignoreValue = ignoreValues != null && ignoreValues.TryGetValue(pi.Name, out var oValue)
                     ? oValue
-                    : pi.PropertyType.GetDefaultValue();
+                    : propType.GetDefaultValue();
                 property.Value = PropertyValue(pi, instance, ignoreValue);
 
                 if (pi.GetSetMethod() == null) //ReadOnly is bool? to minimize serialization
                     property.ReadOnly = true;
             }
             return property;
+        }
+
+        public static string[] ToGenericArgs(Type propType)
+        {
+            var genericArgs = propType.IsGenericType
+                ? propType.GetGenericArguments().Select(x => x.ExpandTypeName()).ToArray()
+                : null;
+            return genericArgs;
         }
 
         public static string PropertyValue(PropertyInfo pi, object instance, object ignoreIfValue=null)
@@ -734,18 +835,7 @@ namespace ServiceStack.NativeTypes
                 var value = pi.GetValue(instance, null);
                 if (value != null && !value.Equals(ignoreIfValue))
                 {
-                    if (pi.PropertyType.IsEnum)
-                    {
-                        return "{0}.{1}".Fmt(pi.PropertyType.Name, value);
-                    }
-                    if (pi.PropertyType == typeof(Type))
-                    {
-                        var type = (Type) value;
-                        return $"typeof({type.FullName})";
-                    }
-
-                    var strValue = value as string;
-                    return strValue ?? value.ToJson();
+                    return PropertyStringValue(pi, value);
                 }
             }
             catch (Exception ex)
@@ -756,19 +846,38 @@ namespace ServiceStack.NativeTypes
             return null;
         }
 
+        public static string PropertyStringValue(PropertyInfo pi, object value)
+        {
+            if (pi.PropertyType.IsEnum)
+            {
+                return "{0}.{1}".Fmt(pi.PropertyType.Name, value);
+            }
+
+            if (pi.PropertyType == typeof(Type))
+            {
+                var type = (Type) value;
+                return $"typeof({type.FullName})";
+            }
+
+            var strValue = value as string;
+            return strValue ?? value.ToJson();
+        }
+
         public MetadataPropertyType ToProperty(ParameterInfo pi)
         {
+            var paramType = pi.ParameterType;
+            var underlyingType = Nullable.GetUnderlyingType(paramType) ?? paramType;
             var propertyAttrs = pi.AllAttributes();
             var property = new MetadataPropertyType
             {
-                PropertyType = pi.ParameterType,
+                PropertyType = paramType,
                 Name = pi.Name,
                 Attributes = ToAttributes(propertyAttrs),
-                Type = pi.ParameterType.GetOperationName(),
-                IsValueType = pi.ParameterType.IsValueType ? true : (bool?)null,
-                IsSystemType = pi.ParameterType.IsSystemType() ? true : (bool?)null,
-                IsEnum = pi.ParameterType.IsEnum ? true : (bool?)null,
-                TypeNamespace = pi.ParameterType.Namespace,
+                Type = paramType.GetOperationName(),
+                IsValueType = underlyingType.IsValueType.NullIfFalse(),
+                IsSystemType = underlyingType.IsSystemType().NullIfFalse(),
+                IsEnum = underlyingType.IsEnum.NullIfFalse(),
+                TypeNamespace = paramType.Namespace,
                 Description = pi.GetDescription(),
             };
 
@@ -782,9 +891,9 @@ namespace ServiceStack.NativeTypes
             var metaAttr = new MetadataDataMember
             {
                 Name = attr.Name,
-                EmitDefaultValue = attr.EmitDefaultValue != true ? attr.EmitDefaultValue : (bool?)null,
+                EmitDefaultValue = attr.EmitDefaultValue == false ? false : (bool?)null, //true by default
                 Order = attr.Order >= 0 ? attr.Order : (int?)null,
-                IsRequired = attr.IsRequired != false ? attr.IsRequired : (bool?)null,
+                IsRequired = attr.IsRequired.NullIfFalse(),
             };
 
             return metaAttr;
@@ -803,15 +912,83 @@ namespace ServiceStack.NativeTypes
 
     public class CreateTypeOptions
     {
+        public List<MetadataRoute> Routes { get; set; }
         public Func<string> ImplementsFn { get; set; }
         public bool IsRequest { get; set; }
         public bool IsResponse { get; set; }
         public bool IsType { get; set; }
         public bool IsNestedType { get; set; }
+        public MetadataOperationType Op { get; set; }
     }
 
     public static class MetadataExtensions
     {
+        public static List<MetadataPropertyType> PopulatePrimaryKey(this List<MetadataPropertyType> props)
+        {
+            //sync with https://github.com/ServiceStack/ServiceStack.OrmLite/blob/master/src/ServiceStack.OrmLite/OrmLiteConfigExtensions.cs
+            var hasPkAttr = props
+                .FirstOrDefault(p => p.PropertyType?.HasAttributeCached<PrimaryKeyAttribute>() == true);
+
+            if (hasPkAttr != null)
+            {
+                hasPkAttr.IsPrimaryKey = true;
+            }
+            else
+            {
+                static bool CheckForIdField(IEnumerable<PropertyInfo> objProperties)
+                {
+                    // Not using Linq.Where() and manually iterating through objProperties just to avoid dependencies on System.Xml??
+                    foreach (var objProperty in objProperties)
+                    {
+                        if (objProperty.Name != Keywords.Id) continue;
+                        return true;
+                    }
+                    return false;
+                }
+
+                var objProperties = props
+                    .Where(x => x.PropertyInfo != null).Map(x => x.PropertyInfo);
+                if (objProperties.Count == 0)
+                    return props;
+
+                var i = 0;
+                foreach (var prop in props)
+                {
+                    var propertyInfo = prop.PropertyInfo;
+                    if (propertyInfo == null) 
+                        continue;
+                    
+                    var isNullableType = propertyInfo.PropertyType.IsNullableType();
+                    
+                    var propertyType = isNullableType
+                        ? Nullable.GetUnderlyingType(propertyInfo.PropertyType)
+                        : propertyInfo.PropertyType;
+                    
+                    var referenceAttr = propertyInfo.FirstAttribute<ReferenceAttribute>();
+                    var isReference = referenceAttr != null && propertyType?.IsClass == true;
+                    var isIgnored = propertyInfo.HasAttributeCached<IgnoreAttribute>() || isReference;
+
+                    var isFirst = !isIgnored && i++ == 0;
+
+                    var isAutoId = propertyInfo.HasAttributeCached<AutoIdAttribute>();
+                    
+                    var hasIdField = CheckForIdField(objProperties);
+                    
+                    var isPrimaryKey = (propertyInfo.Name == Keywords.Id || (!hasIdField && isFirst))
+                                       || propertyInfo.HasAttributeNamed(nameof(PrimaryKeyAttribute))
+                                       || isAutoId;
+
+                    if (isPrimaryKey)
+                    {
+                        prop.IsPrimaryKey = true;
+                        return props;
+                    }
+                }
+            }
+            
+            return props;
+        }
+
         public static MetadataTypeName ToMetadataTypeName(this MetadataType type)
         {
             if (type == null) return null;
@@ -842,34 +1019,73 @@ namespace ServiceStack.NativeTypes
         {
             var allTypes = metadata.Operations.Where(x => x.Request != null).Select(x => x.Request)
                 .Union(metadata.Operations.Where(x => x.Response != null).Select(x => x.Response))
-                .Union(metadata.Operations.Where(x => x.Request?.ReturnMarkerTypeName != null).Select(
-                    x => x.Request.ReturnMarkerTypeName.ToMetadataType()))
+                .Union(metadata.Operations.Where(x => x.ReturnType != null).Select(
+                    x => x.ReturnType.ToMetadataType()))
                 .Union(metadata.Types);
             
             return allTypes.ToList();
         }
 
-        public static HashSet<string> GetReferencedTypeNames(this MetadataType type)
+        public static HashSet<string> GetReferencedTypeNames(this MetadataType type, MetadataTypes metadataTypes)
         {
             var to = new HashSet<string>();
 
+            void Add(string name)
+            {
+                to.Add(name);
+                var metaTypes = metadataTypes.Types.Where(x => x.Name == name).ToList();
+                if (metaTypes.Count == 1)
+                {
+                    var metaType = metaTypes[0];
+                    if (metaType.Inherits != null)
+                    {
+                        Add(metaType.Inherits.Name);
+                        foreach (var genericArg in metaType.Inherits.GenericArgs.Safe())
+                        {
+                            Add(genericArg);
+                        }
+                    }
+                    foreach (var iface in metaType.Implements.Safe())
+                    {
+                        if (!iface.IsSystemOrServiceStackType())
+                        {
+                            Add(iface.Name);
+                        }
+                    }
+                    foreach (var pi in metaType.Properties.Safe())
+                    {
+                        Add(pi.Type);
+                        foreach (var genericArg in pi.GenericArgs.Safe())
+                        {
+                            Add(genericArg);
+                        }
+                    }
+                }
+            }
+            
             if (type.Inherits != null)
             {
-                to.Add(type.Inherits.Name);
+                Add(type.Inherits.Name);
 
                 foreach (var genericArg in type.Inherits.GenericArgs.Safe())
                 {
-                    to.Add(genericArg);
+                    Add(genericArg);
                 }
             }
-
+            foreach (var iface in type.Implements.Safe())
+            {
+                if (!iface.IsSystemOrServiceStackType())
+                {
+                    Add(iface.Name);
+                }
+            }
             foreach (var pi in type.Properties.Safe())
             {
-                to.Add(pi.Type);
+                Add(pi.Type);
 
                 foreach (var genericArg in pi.GenericArgs.Safe())
                 {
-                    to.Add(genericArg);
+                    Add(genericArg);
                 }
             }
 
@@ -885,7 +1101,7 @@ namespace ServiceStack.NativeTypes
 
         public static HashSet<string> GetDefaultNamespaces(this MetadataTypesConfig config, MetadataTypes metadata)
         {
-            var namespaces = config.DefaultNamespaces.ToHashSet();
+            var namespaces = config.DefaultNamespaces.ToSet();
             config.AddNamespaces.Safe().Each(x => namespaces.Add(x));
 
             //Add any ignored namespaces used
@@ -926,6 +1142,9 @@ namespace ServiceStack.NativeTypes
 
         public static List<string> RemoveIgnoredTypes(this MetadataTypes metadata, MetadataTypesConfig config)
         {
+            var excludeServices = config.ExcludeTypes?.Remove("services") ?? false;
+            var excludeTypes = config.ExcludeTypes?.Remove("types") ?? false;
+                
             var includeList = GetIncludeList(metadata, config);
 
             metadata.Types.RemoveAll(x => x.IgnoreType(config, includeList));
@@ -950,9 +1169,23 @@ namespace ServiceStack.NativeTypes
                 if (!metadata.Operations.Any(x => x.Response != null && x.Response.Name == responseType.Name)
                     && metadata.Types.All(x => x.Name != responseType.Name))
                 {
-                    metadata.Types.Add(responseType);
+                    if (!responseType.IgnoreType(config, includeList))
+                    {
+                        metadata.Types.Add(responseType);
+                    }
                 }
             }
+            
+            if (excludeServices)
+                metadata.Operations = new List<MetadataOperationType>();
+            if (excludeTypes)
+                metadata.Types = new List<MetadataType>();
+            
+            //Ugly but need to revert state so it's ExcludeTypes option is emitted in generated dtos
+            if (excludeServices)
+                config.ExcludeTypes.Add("services");
+            if (excludeTypes)
+                config.ExcludeTypes.Add("types");
 
             return includeList;
         }
@@ -963,14 +1196,16 @@ namespace ServiceStack.NativeTypes
 
         public static List<string> GetIncludeList(MetadataTypes metadata, MetadataTypesConfig config)
         {
-            if (config.IncludeTypes == null)
+            if (config.IncludeTypes.IsEmpty())
                 return null;
 
-            var namespacedTypes = config.IncludeTypes
+            var includeTypes = config.IncludeTypes.Where(x => !x.StartsWith("{")).ToList();
+            
+            var namespacedTypes = includeTypes
                 .Where(s => s.Length > 2 && s.EndsWith(NamespaceWildCard))
                 .Map(s => s.Substring(0, s.Length - 2));
 
-            var explicitTypes = config.IncludeTypes
+            var explicitTypes = includeTypes
                 .Where(x => !x.EndsWith(NamespaceWildCard))
                 .ToList();
 
@@ -983,24 +1218,54 @@ namespace ServiceStack.NativeTypes
                 .Map(s => s.Substring(2)).ToArray();
             explicitTypes.AddRange(reverseTypesToExpand);
 
-            if (typesToExpand.Count != 0 || NamespaceWildCard.Length != 0)
+            var tags = config.IncludeTypes.Where(x => x.StartsWith("{") && x.EndsWith("}"))
+                .SelectMany(x => x.Substring(1, x.Length -2).Split(',')).Distinct().ToArray();
+
+            if (tags.Length > 0)
             {
-                var includeTypesInNamespace = NamespaceWildCard.Length > 0
+                var tagTypes = metadata.GetOperationsByTags(tags).Map(x => x.Request.Name);
+                if (tagTypes.Count > 0)
+                {
+                    explicitTypes.AddRange(tagTypes);
+                    typesToExpand.AddRange(tagTypes);
+                }
+            }
+
+            // Operation Return Types should always be included 
+            var ops = metadata.Operations.Where(x => explicitTypes.Contains(x.Request.Name));
+            foreach (var op in ops)
+            {
+                if (op.ReturnType != null)
+                {
+                    typesToExpand.Add(op.ReturnType.Name);
+                    foreach (var arg in op.ReturnType.GenericArgs.Safe())
+                    {
+                        typesToExpand.Add(arg);
+                    }
+                }
+            }
+
+            if (typesToExpand.Count != 0 || namespacedTypes.Count != 0)
+            {
+                var includeTypesInNamespace = namespacedTypes.Count > 0
                     ? metadata.GetAllMetadataTypes()
                         .Where(x => namespacedTypes.Any(ns => x.Namespace?.StartsWith(ns) == true))
                         .Select(x => x.Name)
-                        .ToHashSet()
+                        .ToSet()
                     : TypeConstants<string>.EmptyHashSet;
 
-                var includedMetadataTypes = metadata.Operations
+                var includedMetadataOperations = metadata.Operations
+                    .Where(t => typesToExpand.Contains(t.Request.Name))
+                    .ToList();
+
+                var includedMetadataTypes = includedMetadataOperations
                     .Select(o => o.Request)
-                    .Where(t => typesToExpand.Contains(t.Name))
                     .ToList();
 
                 var includeSet = includedMetadataTypes
-                    .Where(x => x.ReturnMarkerTypeName != null)
-                    .Select(x => x.ReturnMarkerTypeName.Name)
-                    .ToHashSet();
+                    .Where(x => x.RequestType?.ReturnType != null)
+                    .Select(x => x.RequestType.ReturnType.Name)
+                    .ToSet();
 
                 var includedResponses = metadata.Operations
                     .Where(t => typesToExpand.Contains(t.Request.Name) && t.Response != null)
@@ -1008,17 +1273,34 @@ namespace ServiceStack.NativeTypes
                     .ToList();
                 includedResponses.ForEach(x => includeSet.Add(x.Name));
 
+                var includedTypeNames = includedMetadataTypes
+                    .Where(x => x.Implements?.Length > 0)
+                    .SelectMany(x => x.Implements.Select(i => i.Name))
+                    .ToSet();
+                foreach (var op in includedMetadataOperations)
+                {
+                    if (op.ReturnType != null)
+                        includedTypeNames.Add(typeof(IReturn<>).Name);
+                    if (op.ReturnsVoid)
+                        includedTypeNames.Add(nameof(IReturnVoid));
+                }
+                foreach (var metaType in metadata.Types)
+                {
+                    if (includedTypeNames.Contains(metaType.Name))
+                        includedMetadataTypes.Add(metaType);
+                }
+
                 var returnTypesForInclude = metadata.Operations
                     .Where(x => x.Response != null && includeSet.Contains(x.Response.Name))
                     .Map(x => x.Response);
 
-                var crudInterfaces = AutoCrudOperation.CrudInterfaceMetadataNames().ToHashSet();
+                var crudInterfaces = AutoCrudOperation.CrudInterfaceMetadataNames().ToSet();
                 var crudTypeNamesForInclude = metadata.Operations
                     .Where(t => typesToExpand.Contains(t.Request.Name))
                     .SelectMany(x => x.Request.Implements)
                     .Where(x => x != null && crudInterfaces.Contains(x.Name))
                     .Map(x => x.GenericArgs[0])
-                    .ToHashSet()
+                    .ToSet()
                     .ToList();
                 var reverseTypeReferencesToInclude = metadata.Operations
                     .Where(x => x.ReferencesAny(reverseTypesToExpand))
@@ -1028,21 +1310,23 @@ namespace ServiceStack.NativeTypes
                 var referenceTypes = includedMetadataTypes
                     .Union(returnTypesForInclude)
                     .Where(x => x != null)
-                    .SelectMany(x => x.GetReferencedTypeNames());
+                    .SelectMany(x => x.GetReferencedTypeNames(metadata));
 
-                return referenceTypes
+                var ret = referenceTypes
                     .Union(explicitTypes)
                     .Union(includeTypesInNamespace)
                     .Union(typesToExpand)
+                    .Union(includedTypeNames)
                     .Union(crudTypeNamesForInclude)
                     .Union(reverseTypeReferencesToInclude)
                     .Union(returnTypesForInclude.Select(x => x.Name))
                     .Distinct()
                     .ToList();
+                return ret;
             }
 
             // From IncludeTypes get the corresponding MetadataTypes
-            return config.IncludeTypes;
+            return includeTypes;
         }
 
         public static bool IgnoreType(this MetadataType type, MetadataTypesConfig config, List<string> overrideIncludeType = null)
@@ -1144,8 +1428,8 @@ namespace ServiceStack.NativeTypes
                 .Where(x => x.Response != null)
                 .Select(x => x.Response)
                 .Distinct());
-            allTypes.AddRange(metadata.Operations.Select(x => x.Request).Distinct());
-            return allTypes;
+            allTypes.AddRange(metadata.Operations.Select(x => x.Request));
+            return allTypes.Distinct().ToList();
         }
 
         public static List<MetadataType> CreateSortedTypeList(this List<MetadataType> allTypes)
@@ -1214,12 +1498,13 @@ namespace ServiceStack.NativeTypes
             {
                 var typeName = type.Name;
 
-                if (type.ReturnMarkerTypeName != null)
+                var returnMarker = type.RequestType?.ReturnType;
+                if (returnMarker != null)
                 {
-                    if (!type.ReturnMarkerTypeName.GenericArgs.IsEmpty())
-                        type.ReturnMarkerTypeName.GenericArgs.Each(x => deps.Push(typeName, x));
+                    if (!returnMarker.GenericArgs.IsEmpty())
+                        type.RequestType.ReturnType.GenericArgs.Each(x => deps.Push(typeName, x));
                     else
-                        deps.Push(typeName, type.ReturnMarkerTypeName.Name);
+                        deps.Push(typeName, returnMarker.Name);
                 }
                 if (type.Inherits != null)
                 {
@@ -1269,8 +1554,7 @@ namespace ServiceStack.NativeTypes
             var typeDeps = deps.GetValues(type.Name);
             foreach (var typeDep in typeDeps)
             {
-                MetadataType depType;
-                if (!typesMap.TryGetValue(typeDep, out depType)
+                if (!typesMap.TryGetValue(typeDep, out var depType)
                     || considered.Contains(typeDep))
                     continue;
 
@@ -1369,5 +1653,64 @@ namespace ServiceStack.NativeTypes
                 ? type.EnumMemberValues[i]
                 : null;
         }
+
+        public static string GetAttributeName(this Attribute attr) => 
+            StringUtils.RemoveSuffix(attr.GetType().Name, "Attribute");
+
+        public static Type[] GetDirectInterfaces(this Type type)
+        {
+            var childInterfaces = new List<Type>();
+            if (type.BaseType != typeof(object) && type.BaseType != null)
+            {
+                foreach (var childIface in type.BaseType.GetInterfaces())
+                {
+                    childInterfaces.Add(childIface);
+                }
+            }
+            foreach(var iface in type.GetInterfaces())
+            {
+                foreach (var childIface in iface.GetInterfaces())
+                {
+                    childInterfaces.Add(childIface);
+                }
+            }
+            var directInterfaces = type.GetInterfaces().Except(childInterfaces);
+            return directInterfaces.ToArray();
+        }
+
+        public static void Emit(this StringBuilderWrapper sb, MetadataType type, Lang lang)
+        {
+            var attrs = type.Type?.AllAttributes<EmitCodeAttribute>()
+                ?.Where(x => x.Lang.HasFlag(lang));
+            if (attrs != null)
+            {
+                foreach (var attr in attrs)
+                {
+                    foreach (var statement in attr.Statements)
+                    {
+                        sb.AppendLine(statement);
+                    }
+                }
+            }
+        }
+        
+        public static void Emit(this StringBuilderWrapper sb, MetadataPropertyType propType, Lang lang)
+        {
+            var attrs = propType.PropertyInfo?.AllAttributes<EmitCodeAttribute>()
+                ?.Where(x => x.Lang.HasFlag(lang));
+            if (attrs != null)
+            {
+                foreach (var attr in attrs)
+                {
+                    foreach (var statement in attr.Statements)
+                    {
+                        sb.AppendLine(statement);
+                    }
+                }
+            }
+        }
+
+        internal static string EnsureSuffix(this string s, char suffix) =>
+            s == null ? null : s[s.Length - 1] == suffix ? s : s + suffix;
     }
 }

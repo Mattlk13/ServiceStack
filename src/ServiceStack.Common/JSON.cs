@@ -11,7 +11,7 @@ namespace ServiceStack
         public static object parse(string json)
         {
             json.AsSpan().ParseJsToken(out var token);
-            return token.Evaluate(JS.CreateScope());
+            return token?.Evaluate(JS.CreateScope());
         }
 
         public static object parseSpan(ReadOnlySpan<char> json)
@@ -19,6 +19,9 @@ namespace ServiceStack
             if (json.Length == 0) 
                 return null;
             var firstChar = json[0];
+
+            bool isEscapedJsonString(ReadOnlySpan<char> js) =>
+                js.StartsWith(@"{\") || js.StartsWith(@"[{\");
 
             if (firstChar >= '0' && firstChar <= '9')
             {
@@ -32,7 +35,8 @@ namespace ServiceStack
                 if (json.TryParseDouble(out var doubleValue))
                     return doubleValue;
             }
-            else if (firstChar == '{' || firstChar == '[')
+            else if (firstChar == '{' || firstChar == '[' 
+                && !isEscapedJsonString(json.TrimStart())) 
             {
                 json.ParseJsToken(out var token);
                 return token.Evaluate(JS.CreateScope());

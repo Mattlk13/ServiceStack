@@ -18,7 +18,7 @@ namespace ServiceStack
     
     public class InfoScripts : ScriptMethods
     {
-
+        public string env(string variable) => Environment.GetEnvironmentVariable(variable);
         public string envVariable(string variable) => Environment.GetEnvironmentVariable(variable);
         public string envExpandVariables(string name) => Environment.ExpandEnvironmentVariables(name);
         public string envStackTrace() => Environment.StackTrace;
@@ -42,6 +42,7 @@ namespace ServiceStack
         public IDictionary envVariables() => Environment.GetEnvironmentVariables();
         public OperatingSystem envOSVersion() => Environment.OSVersion;
         public string envCommandLine() => Environment.CommandLine;
+        public string[] envCommandLineArgs() => Environment.GetCommandLineArgs();
         public string envMachineName() => Environment.MachineName;
         public string envSystemDirectory() => Environment.SystemDirectory;
         public string envUserDomainName() => Environment.UserDomainName;
@@ -65,6 +66,7 @@ namespace ServiceStack
 
         public IAuthSession userSession(ScriptScopeContext scope) => req(scope).GetSession();
         public string userSessionId(ScriptScopeContext scope) => req(scope).GetSessionId();
+        public string userTempSessionId(ScriptScopeContext scope) => req(scope).GetTemporarySessionId();
         public string userPermanentSessionId(ScriptScopeContext scope) => req(scope).GetPermanentSessionId();
         public HashSet<string> userSessionOptions(ScriptScopeContext scope) => req(scope).GetSessionOptions();
         public bool userHasRole(ScriptScopeContext scope, string role) => 

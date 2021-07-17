@@ -30,9 +30,16 @@ namespace ServiceStack
         {
             Platforms.PlatformNetCore.HostInstance = this;
         }
+        
+        protected AppSelfHostBase(string serviceName, params Type[] serviceTypes)
+            : base(serviceName, TypeConstants<Assembly>.EmptyArray) 
+        {
+            Platforms.PlatformNetCore.HostInstance = this;
+            ServiceController = CreateServiceController(serviceTypes);
+        }
 
         private string pathBase;
-        public string PathBase
+        public override string PathBase
         {
             get => pathBase;
             set
@@ -120,7 +127,7 @@ namespace ServiceStack
 
             NetCoreRequest httpReq;
             IResponse httpRes;
-            System.Web.IHttpHandler handler;
+            IHttpHandler handler;
 
             try 
             {
@@ -176,7 +183,7 @@ namespace ServiceStack
                 }
                 finally
                 {
-                    httpRes.Close();
+                    await httpRes.CloseAsync();
                 }
                 //Matches Exceptions handled in HttpListenerBase.InitTask()
 

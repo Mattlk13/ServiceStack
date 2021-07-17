@@ -21,6 +21,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ServiceStack.Configuration;
 using ServiceStack.IO;
+using ServiceStack.Text;
 
 namespace ServiceStack
 {
@@ -39,9 +40,9 @@ namespace ServiceStack
         }
 
         private string pathBase;
-        public string PathBase
+        public override string PathBase
         {
-            get => pathBase;
+            get => pathBase ?? Config?.HandlerFactoryPath;
             set
             {
                 if (!string.IsNullOrEmpty(value))
@@ -84,7 +85,7 @@ namespace ServiceStack
             if (logFactory != null)
             {
                 NetCoreLogFactory.FallbackLoggerFactory = logFactory;
-                if (LogManager.LogFactory == null)
+                if (LogManager.LogFactory.IsNullOrNullLogFactory())
                     LogManager.LogFactory = new NetCoreLogFactory(logFactory);
             }
 
@@ -95,6 +96,9 @@ namespace ServiceStack
             {
                 requiresConfig.Configuration = config.Configuration;
             }
+
+            var appLifetime = app.ApplicationServices.GetService<IApplicationLifetime>();
+            appLifetime?.ApplicationStopping.Register(appHost.OnApplicationStopping);
         }
 
         /// <summary>
@@ -110,8 +114,7 @@ namespace ServiceStack
 
         private IHostingEnvironment env;
 
-        public IHostingEnvironment HostingEnvironment => env 
-            ?? (env = app?.ApplicationServices.GetService<IHostingEnvironment>());  
+        public IHostingEnvironment HostingEnvironment => env ??= app?.ApplicationServices.GetService<IHostingEnvironment>();  
 
         public override void OnConfigLoad()
         {
@@ -130,6 +133,7 @@ namespace ServiceStack
                     VirtualFiles = new FileSystemVirtualFiles(HostingEnvironment.ContentRootPath);
                 }
                 RegisterLicenseFromAppSettings(AppSettings);
+                InjectRequestContext = app?.ApplicationServices.GetService<IHttpContextAccessor>() != null;
             }
         }
 
@@ -144,18 +148,20 @@ namespace ServiceStack
         }
         
         public Func<HttpContext, Task<bool>> NetCoreHandler { get; set; }
+        
+        public bool InjectRequestContext { get; set; }
 
         public virtual async Task ProcessRequest(HttpContext context, Func<Task> next)
         {
             if (NetCoreHandler != null)
             {
-                var handled = await NetCoreHandler(context);
+                var handled = await NetCoreHandler(context).ConfigAwait();
                 if (handled)
                     return;
             }
             
             //Keep in sync with Kestrel/AppSelfHostBase.cs
-            var operationName = context.Request.GetOperationName().UrlDecode() ?? "Home";
+            var operationName = context.Request.GetOperationName() ?? "Home"; //already decoded
             var pathInfo = context.Request.Path.HasValue
                 ? context.Request.Path.Value
                 : "/";
@@ -166,10 +172,10 @@ namespace ServiceStack
                 //IIS Reports "ASPNETCORE_APPL_PATH" in UPPER CASE
                 var includedInPathInfo = pathInfo.IndexOf(mode, StringComparison.OrdinalIgnoreCase) == 1;
                 var includedInPathBase = context.Request.PathBase.HasValue &&
-                                         context.Request.PathBase.Value.IndexOf(mode, StringComparison.OrdinalIgnoreCase) == 1;
+                    context.Request.PathBase.Value.IndexOf(mode, StringComparison.OrdinalIgnoreCase) == 1;
                 if (!includedInPathInfo && !includedInPathBase)
                 {
-                    await next();
+                    await next().ConfigAwait();
                     return;
                 }
 
@@ -181,7 +187,7 @@ namespace ServiceStack
 
             NetCoreRequest httpReq;
             IResponse httpRes;
-            System.Web.IHttpHandler handler;
+            IHttpHandler handler;
 
             try 
             {
@@ -191,12 +197,15 @@ namespace ServiceStack
                 httpRes = httpReq.Response;
                 handler = HttpHandlerFactory.GetHandler(httpReq);
 
+                if (InjectRequestContext)
+                    context.Items[Keywords.IRequest] = httpReq;
+
                 if (BeforeNextMiddleware != null)
                 {
                     var holdNext = next;
                     next = async () => {
-                        await BeforeNextMiddleware(httpReq);
-                        await holdNext();
+                        await BeforeNextMiddleware(httpReq).ConfigAwait();
+                        await holdNext().ConfigAwait();
                     };
                 }
             } 
@@ -206,13 +215,13 @@ namespace ServiceStack
                 if (logFactory != null)
                 {
                     var log = logFactory.CreateLogger(GetType());
-                    log.LogError(default(EventId), ex, ex.Message);
+                    log.LogError(default, ex, ex.Message);
                 }
 
                 context.Response.ContentType = MimeTypes.PlainText;
-                await context.Response.WriteAsync($"{ex.GetType().Name}: {ex.Message}");
+                await context.Response.WriteAsync($"{ex.GetType().Name}: {ex.Message}").ConfigAwait();
                 if (Config.DebugMode)
-                    await context.Response.WriteAsync($"\nStackTrace:\n{ex.StackTrace}");
+                    await context.Response.WriteAsync($"\nStackTrace:\n{ex.StackTrace}").ConfigAwait();
                 return;
             }
 
@@ -220,7 +229,7 @@ namespace ServiceStack
             {
                 if (serviceStackHandler is NotFoundHttpHandler)
                 {
-                    await next();
+                    await next().ConfigAwait();
                     return;
                 }
 
@@ -234,7 +243,7 @@ namespace ServiceStack
 
                 try
                 {
-                    await serviceStackHandler.ProcessRequestAsync(httpReq, httpRes, operationName);
+                    await serviceStackHandler.ProcessRequestAsync(httpReq, httpRes, operationName).ConfigAwait();
                 }
                 catch (Exception ex)
                 {
@@ -242,19 +251,19 @@ namespace ServiceStack
                     if (logFactory != null)
                     {
                         var log = logFactory.CreateLogger(GetType());
-                        log.LogError(default(EventId), ex, ex.Message);
+                        log.LogError(default, ex, ex.Message);
                     }
                 }
                 finally
                 {
-                    httpRes.Close();
+                    await httpRes.CloseAsync().ConfigAwait();
                 }
                 //Matches Exceptions handled in HttpListenerBase.InitTask()
 
                 return;
             }
 
-            await next();
+            await next().ConfigAwait();
         }
 
         public override string MapProjectPath(string relativePath)
@@ -320,7 +329,11 @@ namespace ServiceStack
         public static IApplicationBuilder GetApp(this IAppHost appHost) => ((IAppHostNetCore)appHost).App;
         public static IServiceProvider GetApplicationServices(this IAppHost appHost) => ((IAppHostNetCore)appHost).App.ApplicationServices;
         public static IHostingEnvironment GetHostingEnvironment(this IAppHost appHost) => ((IAppHostNetCore)appHost).HostingEnvironment;
-        
+
+        public static bool IsDevelopmentEnvironment(this IAppHost appHost) => appHost.GetHostingEnvironment().EnvironmentName == "Development";
+        public static bool IsStagingEnvironment(this IAppHost appHost) => appHost.GetHostingEnvironment().EnvironmentName == "Staging";
+        public static bool IsProductionEnvironment(this IAppHost appHost) => appHost.GetHostingEnvironment().EnvironmentName == "Production";
+
         public static IApplicationBuilder UseServiceStack(this IApplicationBuilder app, AppHostBase appHost)
         {
             appHost.Bind(app);
@@ -328,7 +341,7 @@ namespace ServiceStack
             return app;
         }
 
-        public static IApplicationBuilder Use(this IApplicationBuilder app, System.Web.IHttpAsyncHandler httpHandler)
+        public static IApplicationBuilder Use(this IApplicationBuilder app, IHttpAsyncHandler httpHandler)
         {
             return app.Use(httpHandler.Middleware);
         }

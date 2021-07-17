@@ -19,7 +19,12 @@ namespace ServiceStack
         {
             if (request is IHasServiceScope hasScope)
             {
-                var scope = request.CreateScope();
+                var scopeFactory = (Microsoft.Extensions.DependencyInjection.IServiceScopeFactory) 
+                    hasScope.GetService(typeof(Microsoft.Extensions.DependencyInjection.IServiceScopeFactory));
+                if (scopeFactory == null)
+                    return null;
+                
+                var scope = scopeFactory.CreateScope();
                 hasScope.ServiceScope = scope;
                 return scope;
             }
@@ -34,15 +39,13 @@ namespace ServiceStack
         /// Registers the type in the IoC container and
         /// adds auto-wiring to the specified type.
         /// </summary>
-        /// <param name="serviceType"></param>
-        /// <param name="inFunqAsType"></param>
         public static void RegisterAutoWiredType(this Container container, Type serviceType, Type inFunqAsType,
             ReuseScope scope = ReuseScope.None)
         {
             if (serviceType.IsAbstract || serviceType.ContainsGenericParameters)
                 return;
 
-            var methodInfo = typeof(Container).GetMethodInfo("RegisterAutoWiredAs", Type.EmptyTypes);
+            var methodInfo = typeof(Container).GetMethodInfo(nameof(Container.RegisterAutoWiredAs), Type.EmptyTypes);
             var registerMethodInfo = methodInfo.MakeGenericMethod(new[] { serviceType, inFunqAsType });
 
             var registration = registerMethodInfo.Invoke(container, TypeConstants.EmptyObjectArray) as IRegistration;

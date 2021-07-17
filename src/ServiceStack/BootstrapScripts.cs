@@ -39,14 +39,10 @@ namespace ServiceStack
         public IRawString ValidationSuccess(ScriptScopeContext scope, string message) => ValidationSuccess(scope, message, null);
         public IRawString ValidationSuccess(ScriptScopeContext scope, string message, Dictionary<string,object> divAttrs)
         {
-            var ssFilters = Context.GetServiceStackFilters();
-            if (ssFilters == null)
-                return null;
-
-            var errorStatus = ssFilters.getErrorStatus(scope);
+            var errorStatus = scope.GetErrorStatus();
             if (message == null 
                 || errorStatus != null
-                || ssFilters.req(scope).Verb == HttpMethods.Get)
+                || scope.GetRequest().Verb == HttpMethods.Get)
                 return null; 
 
             return ViewUtils.ValidationSuccess(message, divAttrs).ToRawString();
@@ -66,7 +62,7 @@ namespace ServiceStack
             formControl(scope, inputAttrs, "input", inputOptions);
 
         public IRawString formControl(ScriptScopeContext scope, object inputAttrs, string tagName, object inputOptions) => 
-            ViewUtils.FormControl(Context.GetServiceStackFilters().req(scope), inputAttrs.AssertOptions(nameof(formControl)), tagName, 
+            ViewUtils.FormControl(scope.GetRequest(), inputAttrs.AssertOptions(nameof(formControl)), tagName, 
                 (inputOptions as IEnumerable<KeyValuePair<string, object>>).FromObjectDictionary<InputOptions>()).ToRawString();
 
         NavOptions ToNavOptions(ScriptScopeContext scope, Dictionary<string, object> options)
@@ -75,7 +71,7 @@ namespace ServiceStack
             if (options != null)
             {
                 if (options.TryGetValue("attributes", out var oAttributes))
-                    navOptions.Attributes = ViewUtils.ToStrings(nameof(ToNavOptions), oAttributes).ToHashSet();
+                    navOptions.Attributes = ViewUtils.ToStrings(nameof(ToNavOptions), oAttributes).ToSet();
                 if (options.TryGetValue("activePath", out var oActive))
                     navOptions.ActivePath = (string)oActive;
                 if (options.TryGetValue("baseHref", out var oBaseHref))
@@ -99,7 +95,7 @@ namespace ServiceStack
             if (navOptions.ActivePath == null)
                 navOptions.ActivePath = scope.GetValue("PathInfo")?.ToString();
             if (navOptions.Attributes == null)
-                navOptions.Attributes = Context.GetServiceStackFilters().req(scope).GetUserAttributes();
+                navOptions.Attributes = scope.GetRequest().GetUserAttributes();
             if (navOptions.BaseHref == null)
             {
                 var pathBase = HostContext.Config.PathBase;

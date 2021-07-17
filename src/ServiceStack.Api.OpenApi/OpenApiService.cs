@@ -16,7 +16,7 @@ using ServiceStack.Api.OpenApi.Specification;
 namespace ServiceStack.Api.OpenApi
 {
     [DataContract]
-    [Exclude(Feature.Soap)]
+    [ExcludeMetadata]
     public class OpenApiSpecification : IReturn<OpenApiDeclaration>
     {
         [DataMember(Name = "apiKey")]
@@ -89,8 +89,25 @@ namespace ServiceStack.Api.OpenApi
                 Definitions = definitions.Where(x => !SchemaIdToClrType.ContainsKey(x.Key) || !IsInlineSchema(SchemaIdToClrType[x.Key])).ToDictionary(x => x.Key, x => x.Value),
                 Tags = tags.Values.OrderBy(x => x.Name).ToList(),
                 Parameters = new Dictionary<string, OpenApiParameter> { { "Accept", GetAcceptHeaderParameter() } },
-                SecurityDefinitions = SecurityDefinitions,                
+                SecurityDefinitions = SecurityDefinitions,
             };
+
+            if (SchemaFilter != null)
+            {
+                result.Parameters.Each(x => {
+                    if (x.Value.Schema != null)
+                        SchemaFilter(x.Value.Schema);
+                });
+                result.Definitions.Each(x => {
+                    if (x.Value.AllOf != null)
+                        SchemaFilter(x.Value.AllOf);
+                    SchemaFilter(x.Value);
+                });
+                result.Responses.Each(x => {
+                    if (x.Value.Schema != null)
+                        SchemaFilter(x.Value.Schema);
+                });
+            }
 
             if (OperationFilter != null)
                 apiPaths.Each(x => GetOperations(x.Value).Each(o => OperationFilter(o.Item1, o.Item2)));
@@ -302,7 +319,7 @@ namespace ServiceStack.Api.OpenApi
                 Type = OpenApiType.Object,
                 Title = GetSchemaTypeName(schemaType),
                 Description = schemaType.GetDescription() ?? GetSchemaTypeName(schemaType),
-                Properties = new OrderedDictionary<string, OpenApiProperty>()
+                Properties = new OrderedDictionary<string, OpenApiProperty>
                 {
                     { "Key", GetOpenApiProperty(schemas, keyType, route, verb) },
                     { "Value", GetOpenApiProperty(schemas, valueType, route, verb) }
@@ -332,9 +349,18 @@ namespace ServiceStack.Api.OpenApi
 
         private static readonly Regex swaggerRefRegex = new Regex("[^A-Za-z0-9\\.\\-_]", RegexOptions.Compiled);
 
+        private OpenApiProperty GetOpenApiProperty(IDictionary<string, OpenApiSchema> schemas, PropertyInfo pi, string route, string verb)
+        {
+            var ret = GetOpenApiProperty(schemas, pi.PropertyType, route, verb);
+            ret.PropertyInfo = pi;
+            return ret;
+        }
+        
         private OpenApiProperty GetOpenApiProperty(IDictionary<string, OpenApiSchema> schemas, Type propertyType, string route, string verb)
         {
-            var schemaProp = new OpenApiProperty();
+            var schemaProp = new OpenApiProperty {
+                PropertyType = propertyType,
+            };
 
             if (IsKeyValuePairType(propertyType))
             {
@@ -532,7 +558,7 @@ namespace ServiceStack.Api.OpenApi
 
                     if (apiMembers.Any(x => x.ExcludeInSchema))
                         continue;
-                    var schemaProperty = GetOpenApiProperty(schemas, prop.PropertyType, route, verb);
+                    var schemaProperty = GetOpenApiProperty(schemas, prop, route, verb);
                     var schemaPropertyName = GetSchemaPropertyName(prop);
 
                     schemaProperty.Description = prop.GetDescription() ?? apiDoc?.Description;
@@ -699,23 +725,12 @@ namespace ServiceStack.Api.OpenApi
                 }
 
                 var op = HostContext.Metadata.OperationsMap[requestType];
-                var actions = HostContext.Metadata.GetImplementedActions(op.ServiceType, op.RequestType);
-
-                var authAttrs = new[] { op.ServiceType, op.RequestType }
-                    .SelectMany(x => x.AllAttributes().OfType<AuthenticateAttribute>()).ToList();
-
-                authAttrs.AddRange(actions
-                    .Where(x => x.Name.ToUpperInvariant() == ActionContext.AnyAction)
-                    .SelectMany(x => x.AllAttributes<AuthenticateAttribute>())
-                );
 
                 var annotatingTagAttributes = requestType.AllAttributes<TagAttribute>();
 
                 foreach (var verb in verbs)
                 {
-                    var needAuth = authAttrs.Count > 0
-                        || actions.Where(x => x.Name.ToUpperInvariant() == verb)
-                            .SelectMany(x => x.AllAttributes<AuthenticateAttribute>()).Any();
+                    var needAuth = op.RequiresAuthentication;
 
                     var userTags = new List<string>();
                     if (ApplyToUtils.VerbsApplyTo.TryGetValue(verb, out var applyToVerb))
@@ -797,7 +812,7 @@ namespace ServiceStack.Api.OpenApi
         };
 
 
-        HashSet<string> operationIds = new HashSet<string>();
+        HashSet<string> operationIds = new();
 
         /// Returns operation postfix to make operationId unique and swagger json be validable
         private string GetOperationName(string name, string route, string verb)
@@ -812,7 +827,7 @@ namespace ServiceStack.Api.OpenApi
                 pathPostfix = string.Join(string.Empty, entries, 1, entries.Length - 1);
 
             postfixes.TryGetValue(verb, out var verbPostfix);
-            verbPostfix = verbPostfix ?? string.Empty;
+            verbPostfix ??= string.Empty;
 
             var operationId = name + pathPostfix + verbPostfix;
 
@@ -1004,8 +1019,8 @@ namespace ServiceStack.Api.OpenApi
 
         private List<string> GetTags(string path)
         {
-            var tagname = GetTagName(path);
-            return tagname != null ? new List<string> { tagname } : null;
+            var tagName = GetTagName(path);
+            return tagName != null ? new List<string> { tagName } : null;
         }
 
         private string GetTagName(string path)

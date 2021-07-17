@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Xml;
 using ServiceStack.Auth;
+using ServiceStack.Configuration;
 using ServiceStack.DataAnnotations;
 using ServiceStack.FluentValidation;
 using ServiceStack.NativeTypes;
@@ -38,7 +38,11 @@ namespace ServiceStack.Host
 
         public void Add(Type serviceType, Type requestType, Type responseType)
         {
-            if (requestType.IsArray) return; //Custom AutoBatched requests
+            if (requestType.IsArray) //Custom AutoBatched requests
+            {
+                this.ServiceTypes.Add(serviceType);
+                return;
+            }
             
             this.ServiceTypes.Add(serviceType);
             this.RequestTypes.Add(requestType);
@@ -52,8 +56,9 @@ namespace ServiceStack.Host
                 .SelectMany(x => x.AllAttributes().OfType<IResponseFilterBase>()).ToList();
 
             var authAttrs = reqFilterAttrs.OfType<AuthenticateAttribute>().ToList();
-            var actions = GetImplementedActions(serviceType, requestType);
+            var actions = serviceType.GetRequestActions(requestType);
             authAttrs.AddRange(actions.SelectMany(x => x.AllAttributes<AuthenticateAttribute>()));
+            var tagAttrs = requestType.AllAttributes<TagAttribute>().ToList();
 
             var operation = new Operation
             {
@@ -61,7 +66,7 @@ namespace ServiceStack.Host
                 RequestType = requestType,
                 ResponseType = responseType,
                 RestrictTo = restrictTo,
-                Actions = actions.Map(x => x.Name.ToUpper()),
+                Actions = actions.Select(x => x.NameUpper).Distinct().ToList(),
                 Routes = new List<RestPath>(),
                 RequestFilterAttributes = reqFilterAttrs,
                 ResponseFilterAttributes = resFilterAttrs,
@@ -70,6 +75,7 @@ namespace ServiceStack.Host
                 RequiresAnyRole = authAttrs.OfType<RequiresAnyRoleAttribute>().SelectMany(x => x.RequiredRoles).ToList(),
                 RequiredPermissions = authAttrs.OfType<RequiredPermissionAttribute>().SelectMany(x => x.RequiredPermissions).ToList(),
                 RequiresAnyPermission = authAttrs.OfType<RequiresAnyPermissionAttribute>().SelectMany(x => x.RequiredPermissions).ToList(),
+                Tags = tagAttrs,
             };
 
             this.OperationsMap[requestType] = operation;
@@ -86,7 +92,8 @@ namespace ServiceStack.Host
                 && x.ServiceType.FullName != "ServiceStack.Api.Swagger.SwaggerApiService"
                 && x.ServiceType.FullName != "ServiceStack.Api.Swagger.SwaggerResourcesService"
                 && x.ServiceType.FullName != "ServiceStack.Api.OpenApi.OpenApiService"
-                && x.ServiceType.Name != "__AutoQueryServices");
+                && x.ServiceType.Name != "__AutoQueryServices"
+                && x.ServiceType.Name != "__AutoQueryDataServices");
 
             LicenseUtils.AssertValidUsage(LicenseFeature.ServiceStack, QuotaType.Operations, nonCoreServicesCount);
         }
@@ -128,6 +135,12 @@ namespace ServiceStack.Host
                 .ToList();
         }
 
+        public List<Operation> GetOperationsByTag(string tag) => 
+            Operations.Where(x => x.Tags.Any(t => t.Name == tag)).ToList();
+
+        public List<Operation> GetOperationsByTags(string[] tags) => 
+            Operations.Where(x => x.Tags.Any(t => Array.IndexOf(tags, t.Name) >= 0)).ToList();
+
         public Operation GetOperation(Type requestType)
         {
             if (requestType == null)
@@ -137,7 +150,7 @@ namespace ServiceStack.Host
             return op;
         }
 
-        public List<MethodInfo> GetImplementedActions(Type serviceType, Type requestType)
+        public List<ActionMethod> GetImplementedActions(Type serviceType, Type requestType)
         {
             if (!typeof(IService).IsAssignableFrom(serviceType))
                 throw new NotSupportedException("All Services must implement IService");
@@ -346,8 +359,12 @@ namespace ServiceStack.Host
                     : RequestAttributes.External);
         }
 
+        private HashSet<Type> allDtos;
         public HashSet<Type> GetAllDtos()
         {
+            if (allDtos != null)
+                return allDtos;
+            
             var to = new HashSet<Type>();
             var ops = OperationsMap.Values;
             foreach (var op in ops)
@@ -355,7 +372,39 @@ namespace ServiceStack.Host
                 AddReferencedTypes(to, op.RequestType);
                 AddReferencedTypes(to, op.ResponseType);
             }
-            return to;
+            return allDtos = to;
+        }
+
+        private Dictionary<string, Type> dtoTypesMap;
+        private HashSet<string> duplicateTypeNames;
+        public Type FindDtoType(string typeName)
+        {
+            var opType = GetOperationType(typeName ?? throw new ArgumentNullException(nameof(typeName)));
+            if (opType != null)
+                return opType;
+
+            if (dtoTypesMap == null)
+            {
+                var typesMap = new Dictionary<string, Type>();
+                duplicateTypeNames = new HashSet<string>();
+
+                foreach (var dto in GetAllDtos())
+                {
+                    if (typesMap.ContainsKey(dto.Name))
+                    {
+                        duplicateTypeNames.Add(dto.Name);
+                        continue;
+                    }
+                    typesMap[dto.Name] = dto;
+                }
+                dtoTypesMap = typesMap;
+            }
+
+            if (duplicateTypeNames.Contains(typeName))
+                throw new Exception($"There are multiple DTO Types named '{typeName}'");
+                
+            dtoTypesMap.TryGetValue(typeName, out var dtoType);
+            return dtoType;
         }
 
         public RestPath FindRoute(string pathInfo, string method = HttpMethods.Get)
@@ -610,6 +659,36 @@ namespace ServiceStack.Host
             return soapTypes;
         }
 #endif
+
+        public List<string> GetAllRoles()
+        {
+            var to = new List<string> {
+                RoleNames.Admin
+            };
+
+            foreach (var op in OperationsMap.Values)
+            {
+                op.RequiredRoles.Each(x => to.AddIfNotExists(x));
+                op.RequiresAnyRole.Each(x => to.AddIfNotExists(x));
+            }
+
+            return to;
+        }
+
+        public List<string> GetAllPermissions()
+        {
+            var to = new List<string> {
+            };
+
+            foreach (var op in OperationsMap.Values)
+            {
+                op.RequiredPermissions.Each(x => to.AddIfNotExists(x));
+                op.RequiresAnyPermission.Each(x => to.AddIfNotExists(x));
+            }
+
+            return to;
+        }
+        
     }
 
     public class Operation
@@ -619,6 +698,8 @@ namespace ServiceStack.Host
         public Type RequestType { get; set; }
         public Type ServiceType { get; set; }
         public Type ResponseType { get; set; }
+        public Type DataModelType => AutoCrudOperation.GetModelType(RequestType);
+        public Type ViewModelType => AutoCrudOperation.GetViewModelType(RequestType, ResponseType);
         public RestrictAttribute RestrictTo { get; set; }
         public List<string> Actions { get; set; }
         public List<RestPath> Routes { get; set; }
@@ -630,9 +711,48 @@ namespace ServiceStack.Host
         public List<string> RequiresAnyRole { get; set; }
         public List<string> RequiredPermissions { get; set; }
         public List<string> RequiresAnyPermission { get; set; }
+        public List<TagAttribute> Tags { get; set; }
         
-        public List<ITypeValidator> RequestTypeValidationRules { get; set; }
-        public List<IValidationRule> RequestPropertyValidationRules { get; set; }
+        public List<ITypeValidator> RequestTypeValidationRules { get; private set; }
+        public List<IValidationRule> RequestPropertyValidationRules { get; private set; }
+
+        public void AddRequestTypeValidationRules(List<ITypeValidator> typeValidators)
+        {
+            if (typeValidators != null)
+            {
+                RequestTypeValidationRules ??= new List<ITypeValidator>();
+                RequestTypeValidationRules.AddRange(typeValidators);
+
+                var authValidators = typeValidators.OfType<IAuthTypeValidator>().ToList();
+                if (authValidators.Count > 0)
+                {
+                    RequiresAuthentication = true;
+
+                    var rolesValidators = authValidators.OfType<HasRolesValidator>();
+                    foreach (var validator in rolesValidators)
+                    {
+                        RequiredRoles ??= new List<string>();
+                        validator.Roles.Each(x => RequiredRoles.AddIfNotExists(x));
+                    }
+
+                    var permsValidators = authValidators.OfType<HasPermissionsValidator>();
+                    foreach (var validator in permsValidators)
+                    {
+                        RequiredPermissions ??= new List<string>();
+                        validator.Permissions.Each(x => RequiredPermissions.AddIfNotExists(x));
+                    }
+                }
+            }
+        }
+
+        public void AddRequestPropertyValidationRules(List<IValidationRule> propertyValidators)
+        {
+            if (propertyValidators != null)
+            {
+                RequestPropertyValidationRules ??= new List<IValidationRule>();
+                RequestPropertyValidationRules.AddRange(propertyValidators);
+            }
+        }
     }
 
     public class OperationDto
@@ -644,6 +764,7 @@ namespace ServiceStack.Host
         public List<string> VisibleTo { get; set; }
         public List<string> Actions { get; set; }
         public List<string> Routes { get; set; }
+        public List<string> Tags { get; set; }
     }
 
     public class XsdMetadata
@@ -713,6 +834,7 @@ namespace ServiceStack.Host
                 ServiceName = operation.ServiceType.GetOperationName(),
                 Actions = operation.Actions,
                 Routes = operation.Routes.Map(x => x.Path),
+                Tags = operation.Tags.Map(x => x.Name),
             };
 
             if (operation.RestrictTo != null)
@@ -730,10 +852,10 @@ namespace ServiceStack.Host
             var attrs = new List<ApiMemberAttribute>();
             foreach (var member in members)
             {
-                var memattr = member.AllAttributes<ApiMemberAttribute>()
-                    .Select(x => { x.Name = x.Name ?? member.Name; return x; });
+                var attr = member.AllAttributes<ApiMemberAttribute>()
+                    .Select(x => { x.Name ??= member.Name; return x; });
 
-                attrs.AddRange(memattr);
+                attrs.AddRange(attr);
             }
 
             return attrs;
@@ -806,12 +928,27 @@ namespace ServiceStack.Host
             type != null && type.IsInterface.GetValueOrDefault();
 
         public static bool IsAbstract(this MetadataType type) => 
-            type.IsAbstract.GetValueOrDefault() || type.Name == typeof(AuthUserSession).Name;
+            type.IsAbstract.GetValueOrDefault() || type.Name == nameof(AuthUserSession);
 
         public static bool ExcludesFeature(this Type type, Feature feature) => 
             type.FirstAttribute<ExcludeAttribute>()?.Feature.Has(feature) == true;
 
         public static bool Has(this Feature feature, Feature flag) => 
             (flag & feature) != 0;
+
+        public static bool? NullIfFalse(this bool value) => value ? true : (bool?)null;
+
+        public static Dictionary<string, string[]> ToMetadataServiceRoutes(this Dictionary<Type, string[]> serviceRoutes,
+            Action<Dictionary<string,string[]>> filter=null)
+        {
+            var to = new Dictionary<string,string[]>();
+            foreach (var entry in serviceRoutes.Safe())
+            {
+                to[entry.Key.Name] = entry.Value;
+            }
+            filter?.Invoke(to);
+            return to;
+        }
     }
+    
 }

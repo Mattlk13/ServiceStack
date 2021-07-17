@@ -76,7 +76,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
                 RuleFor(c => c.Name)
                     .Must(x => !base.Request.PathInfo.ContainsAny("-", ".", " "));
 
-                RuleFor(x => x.Items).SetCollectionValidator(new MyRequestItemValidator());
+                RuleForEach(x => x.Items).SetValidator(new MyRequestItemValidator());
             });
         }
     }
@@ -180,6 +180,10 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             catch (Exception ex)
             {
                 var body = ex.GetResponseBody();
+                /**
+                 * Need to add `Request = Request,` in all ValidationContext.Clone* APIs starting from L177 + GetFromNonGenericContext() L96
+                 */
+                // body.Print();
                 Assert.That(body, Is.EqualTo("{\"code\":\"Predicate\",\"error\":\"The specified condition was not met for 'Name'.\"}"));
             }
         }

@@ -2,11 +2,15 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
+using ServiceStack.Text;
 
 namespace ServiceStack
 {
     public static class EnumerableUtils
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static object FirstOrDefault(IEnumerable items)
         {
             if (items == null)
@@ -18,6 +22,7 @@ namespace ServiceStack
             return null;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static object ElementAt(IEnumerable items, int index)
         {
             if (items == null)
@@ -29,6 +34,7 @@ namespace ServiceStack
             return null;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<object> Skip(IEnumerable items, int count)
         {
             if (items == null)
@@ -45,6 +51,7 @@ namespace ServiceStack
             return to;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<object> SplitOnFirst(IEnumerable items, out object first)
         {
             first = null;
@@ -64,6 +71,7 @@ namespace ServiceStack
             return to;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<object> Take(IEnumerable items, int count)
         {
             if (items == null)
@@ -82,6 +90,7 @@ namespace ServiceStack
             return to;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int Count(IEnumerable items)
         {
             if (items == null)
@@ -91,6 +100,7 @@ namespace ServiceStack
                 : items.Cast<object>().Count();
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<object> ToList(IEnumerable items)
         {
             if (items == null)
@@ -103,6 +113,7 @@ namespace ServiceStack
             return to;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IEnumerable NullIfEmpty(IEnumerable items)
         {
             if (items != null)
@@ -113,17 +124,26 @@ namespace ServiceStack
             return null;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsEmpty(IEnumerable items) => EnumerableUtils.NullIfEmpty(items) == null;
     }
     
     public static class EnumerableExtensions
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsEmpty<T>(this ICollection<T> collection) => collection == null || collection.Count == 0;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsEmpty<T>(this T[] collection) => collection == null || collection.Length == 0;
 
-        public static HashSet<T> ToHashSet<T>(this IEnumerable<T> items) => new HashSet<T>(items);
+        [Obsolete("Use ToSet() or 'using System.Linq;'")]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static HashSet<T> ToHashSet<T>(this IEnumerable<T> items) => new(items);
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static HashSet<T> ToSet<T>(this IEnumerable<T> items) => new(items);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Each<T>(this IEnumerable<T> values, Action<T> action)
         {
             if (values == null) return;
@@ -134,6 +154,7 @@ namespace ServiceStack
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Each<T>(this IEnumerable<T> values, Action<int, T> action)
         {
             if (values == null) return;
@@ -145,6 +166,7 @@ namespace ServiceStack
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Each<TKey, TValue>(this IDictionary<TKey, TValue> map, Action<TKey, TValue> action)
         {
             if (map == null) return;
@@ -156,6 +178,7 @@ namespace ServiceStack
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<To> Map<To, From>(this IEnumerable<From> items, Func<From, To> converter)
         {
             if (items == null)
@@ -169,6 +192,7 @@ namespace ServiceStack
             return list;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<To> Map<To>(this System.Collections.IEnumerable items, Func<object, To> converter)
         {
             if (items == null)
@@ -182,6 +206,7 @@ namespace ServiceStack
             return list;
         }
         
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static List<object> ToObjects<T>(this IEnumerable<T> items)
         {
             var to = new List<object>();
@@ -192,6 +217,7 @@ namespace ServiceStack
             return to;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static string FirstNonDefaultOrEmpty(this IEnumerable<string> values)
         {
             foreach (var value in values)
@@ -201,6 +227,7 @@ namespace ServiceStack
             return null;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T FirstNonDefault<T>(this IEnumerable<T> values)
         {
             foreach (var value in values)
@@ -210,8 +237,15 @@ namespace ServiceStack
             return default(T);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool EquivalentTo(this byte[] bytes, byte[] other)
         {
+            if (bytes == null || other == null)
+                return bytes == other;
+
+            if (bytes.Length != other.Length)
+                return false;
+
             var compare = 0;
             for (var i = 0; i < other.Length; i++)
                 compare |= other[i] ^ bytes[i];
@@ -219,6 +253,7 @@ namespace ServiceStack
             return compare == 0;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool EquivalentTo<T>(this T[] array, T[] otherArray, Func<T, T, bool> comparer = null)
         {
             if (array == null || otherArray == null)
@@ -294,6 +329,7 @@ namespace ServiceStack
             return true;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IEnumerable<T[]> BatchesOf<T>(this IEnumerable<T> sequence, int batchSize)
         {
             var batch = new List<T>(batchSize);
@@ -314,6 +350,7 @@ namespace ServiceStack
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Dictionary<TKey, T> ToSafeDictionary<T, TKey>(this IEnumerable<T> list, Func<T, TKey> expr)
         {
             var map = new Dictionary<TKey, T>();
@@ -327,6 +364,7 @@ namespace ServiceStack
             return map;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Dictionary<TKey, TValue> ToDictionary<T, TKey, TValue>(this IEnumerable<T> list, Func<T, KeyValuePair<TKey, TValue>> map)
         {
             var to = new Dictionary<TKey, TValue>();
@@ -341,8 +379,73 @@ namespace ServiceStack
         /// <summary>
         /// Return T[0] when enumerable is null, safe to use in enumerations like foreach
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IEnumerable<T> Safe<T>(this IEnumerable<T> enumerable) => enumerable ?? TypeConstants<T>.EmptyArray;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static IEnumerable Safe(this IEnumerable enumerable) => enumerable ?? TypeConstants.EmptyObjectArray;
+
+        public static async Task<bool> AllAsync<T>(this IEnumerable<T> source, Func<T, Task<bool>> predicate)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (predicate == null)
+                throw new ArgumentNullException(nameof(predicate));
+            foreach (var item in source)
+            {
+                var result = await predicate(item).ConfigAwait();
+                if (!result)
+                    return false;
+            }
+            return true;
+        }
+
+        // This is for synchronous predicates with an async source.
+        public static async Task<bool> AllAsync<T>(this IEnumerable<Task<T>> source, Func<T, bool> predicate)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (predicate == null)
+                throw new ArgumentNullException(nameof(predicate));
+            foreach (var item in source)
+            {
+                var awaitedItem = await item.ConfigAwait();
+                if (!predicate(awaitedItem))
+                    return false;
+            }
+            return true;
+        }
+
+        public static async Task<bool> AnyAsync<T>(this IEnumerable<T> source, Func<T, Task<bool>> predicate)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (predicate == null)
+                throw new ArgumentNullException(nameof(predicate));
+            foreach (var item in source)
+            {
+                var result = await predicate(item).ConfigAwait();
+                if (result)
+                    return true;
+            }
+            return false;
+        }
+
+        // This is for synchronous predicates with an async source.
+        public static async Task<bool> AnyAsync<T>(this IEnumerable<Task<T>> source, Func<T, bool> predicate)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (predicate == null)
+                throw new ArgumentNullException(nameof(predicate));
+            foreach (var item in source)
+            {
+                var awaitedItem = await item.ConfigAwait();
+                if (predicate(awaitedItem))
+                    return true;
+            }
+            return false;
+        }
+        
     }
 }

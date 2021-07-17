@@ -1,20 +1,19 @@
 #region License
-// Copyright (c) Jeremy Skinner (http://www.jeremyskinner.co.uk)
-// and contributors.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License"); 
-// you may not use this file except in compliance with the License. 
-// You may obtain a copy of the License at 
-// 
-// http://www.apache.org/licenses/LICENSE-2.0 
-// 
-// Unless required by applicable law or agreed to in writing, software 
-// distributed under the License is distributed on an "AS IS" BASIS, 
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-// See the License for the specific language governing permissions and 
+// Copyright (c) .NET Foundation and contributors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
 // limitations under the License.
-// 
-// The latest version of this file can be found at https://github.com/jeremyskinner/FluentValidation
+//
+// The latest version of this file can be found at https://github.com/FluentValidation/FluentValidation
 #endregion
 
 namespace ServiceStack.FluentValidation.Validators {
@@ -29,7 +28,7 @@ namespace ServiceStack.FluentValidation.Validators {
 
 		private readonly bool _caseSensitive;
 
-		public StringEnumValidator(Type enumType, bool caseSensitive) : base(new LanguageStringSource(nameof(EnumValidator))) { // Default message identical to EnumValidator
+		public StringEnumValidator(Type enumType, bool caseSensitive) {
 			if (enumType == null) throw new ArgumentNullException(nameof(enumType));
 
 			CheckTypeIsEnum(enumType);
@@ -48,10 +47,15 @@ namespace ServiceStack.FluentValidation.Validators {
 		}
 
 		private void CheckTypeIsEnum(Type enumType) {
-			if (!enumType.GetTypeInfo().IsEnum) {
+			if (!enumType.IsEnum) {
 				string message = $"The type '{enumType.Name}' is not an enum and can't be used with IsEnumName.";
 				throw new ArgumentOutOfRangeException(nameof(enumType), message);
 			}
+		}
+
+		protected override string GetDefaultMessageTemplate() {
+			// Intentionally the same message as EnumValidator.
+			return Localized(nameof(EnumValidator));
 		}
 	}
 }

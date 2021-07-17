@@ -88,6 +88,40 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             AutoQuery.UpdateAsync(request, Request);
     }
 
+    public class AutoCrudBatchServices : Service
+    {
+        public IAutoQueryDb AutoQuery { get; set; }
+
+        protected virtual async Task<object> BatchCreateAsync<T>(IEnumerable<ICreateDb<T>> requests)
+        {
+            using var db = AutoQuery.GetDb<T>(Request);
+            using var dbTrans = db.OpenTransaction();
+
+            var results = new List<object>();
+            foreach (var request in requests)
+            {
+                var response = await AutoQuery.CreateAsync(request, Request, db);
+                results.Add(response);
+            }
+
+            dbTrans.Commit();
+            return results;            
+        }
+
+        public object Any(CustomCreateBooking[] requests) => BatchCreateAsync(requests);
+    }
+
+    /*
+    public abstract class B
+    {
+        public virtual async Task<object> BatchCreateAsync<T>(IEnumerable<ICreateDb<T>> requests) => Task.FromResult("A");
+    }
+    public class A : B
+    {
+        public object Any(CustomCreateBooking[] requests) => BatchCreateAsync(requests);
+    }
+    */
+
     public partial class AutoQueryCrudTests
     {
         private readonly ServiceStackHost appHost;
@@ -208,6 +242,8 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             db.CreateTable<RockstarAutoGuid>();
             db.CreateTable<RockstarVersion>();
             db.CreateTable<Bookmark>();
+            db.CreateTable<DefaultValue>();
+            db.CreateTable<Booking>();
 
             AutoMapping.RegisterPopulator((Dictionary<string,object> target, CreateRockstarWithAutoGuid source) => {
                 if (source.FirstName == "Created")
@@ -423,7 +459,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         {
             try
             {
-                client.Post(new UpdateRockstar {
+                client.Put(new UpdateRockstar {
                     Id = 100,
                     LastName = "UpdateRockstar",
                 });
@@ -790,7 +826,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             Assert.That(patchResponse.Result.FirstName, Is.EqualTo("Updated & Patched"));
             assertUpdated(patchResponse.Result);
 
-            var softDeleteResponse = authClient.Delete(new SoftDeleteAuditTenant {
+            var softDeleteResponse = authClient.Put(new SoftDeleteAuditTenant {
                 Id = id,
             });
 
@@ -868,7 +904,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
                 FirstName = "UpdatedGateway",
                 LivingStatus = LivingStatus.Alive,
             };
-            var updateResponse = authClient.Patch(updateRequest);
+            var updateResponse = authClient.Put(updateRequest);
             result = updateResponse.Result;
             
             Assert.That(updateResponse.Id, Is.EqualTo(createResponse.Id));
@@ -932,7 +968,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
                 FirstName = nameof(UpdateRockstarAuditTenantMq),
                 LivingStatus = LivingStatus.Alive,
             };
-            authClient.Patch(updateRequest);
+            authClient.Put(updateRequest);
 
             ExecUtils.RetryUntilTrue(() => 
                     db.Exists<RockstarAuditTenant>(x => x.FirstName == nameof(UpdateRockstarAuditTenantMq)),
@@ -1208,6 +1244,362 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             Assert.That(updateResponse.Result.FirstName, Is.EqualTo("Updated"));
             Assert.That(updateResponse.Result.Age, Is.EqualTo(21));
             Assert.That(updateResponse.Result.LivingStatus, Is.EqualTo(LivingStatus.Dead));
+        }
+
+        [Test]
+        public void Can_Patch_DefaultFields_to_default_values()
+        {
+            var createRequest = new CreateDefaultValues {
+                Id = 1,
+                Bool = true,
+                NBool = false,
+                Int = 2,
+                NInt = 3,
+                String = "A",
+            };
+            var createResponse = client.Post(createRequest);
+            AssertCreateDefaultValues(createRequest);
+            
+            var request = new PatchDefaultValues {
+                Id = createRequest.Id,
+                Reset = new[] {
+                    nameof(PatchDefaultValues.Bool),
+                    nameof(PatchDefaultValues.NBool),
+                    nameof(PatchDefaultValues.Int),
+                    nameof(PatchDefaultValues.NInt),
+                    nameof(PatchDefaultValues.String),
+                },
+            };
+            client.Patch(request);
+            
+            using var db = appHost.GetDbConnection();
+            var row = db.SingleById<DefaultValue>(createRequest.Id);
+            Assert.That(row.Bool, Is.EqualTo(default(bool)));
+            Assert.That(row.NBool, Is.EqualTo(default(bool?)));
+            Assert.That(row.Int, Is.EqualTo(default(int)));
+            Assert.That(row.NInt, Is.EqualTo(default(int?)));
+            Assert.That(row.String, Is.EqualTo(default(string)));
+            
+            Assert.Throws<WebServiceException>(() => client.Post(new PatchDefaultValues {
+                Id = createRequest.Id,
+                Reset = new[] { nameof(PatchDefaultValues.Id) },
+            }));
+        }
+
+        private void AssertCreateDefaultValues(CreateDefaultValues createRequest)
+        {
+            using var db = appHost.GetDbConnection();
+            var row = db.SingleById<DefaultValue>(createRequest.Id);
+            Assert.That(row.Id, Is.EqualTo(createRequest.Id));
+            Assert.That(row.Bool, Is.EqualTo(createRequest.Bool));
+            Assert.That(row.NBool, Is.EqualTo(createRequest.NBool));
+            Assert.That(row.Int, Is.EqualTo(createRequest.Int));
+            Assert.That(row.NInt, Is.EqualTo(createRequest.NInt));
+            Assert.That(row.String, Is.EqualTo(createRequest.String));
+        }
+
+        [Test]
+        public void Does_ignore_unknown_properties_not_on_DataModel()
+        {
+            var createResponse = client.Post(new CreateRockstarUnknownField {
+                FirstName = "UpdateReturn",
+                LastName = "Result",
+                Age = 20,
+                DateOfBirth = new DateTime(2001,7,1),
+                LivingStatus = LivingStatus.Dead,
+                Unknown = "Field",
+            });
+
+            var queryResponse = client.Get(new QueryRockstarsUnknownField {
+                Id = createResponse.Id,
+                Unknown = "Field",
+            });
+            
+            Assert.That(queryResponse.Results.Count, Is.EqualTo(1));
+            
+            var updateResponse = client.Put(new UpdateRockstarUnknownField {
+                Id = createResponse.Id, 
+                LastName = "UpdateResult",
+                Unknown = "Field",
+            });
+            
+            var patchResponse = client.Patch(new PatchRockstarUnknownField {
+                Id = createResponse.Id, 
+                LastName = "PatchResult",
+                Unknown = "Field",
+            });
+            
+            var deleteResponse = client.Delete(new DeleteRockstarUnknownField {
+                Id = createResponse.Id, 
+                Unknown = "Field",
+            });
+        }
+
+        [Test]
+        public async Task Does_ignore_unknown_properties_not_on_DataModel_Async()
+        {
+            var createResponse = await client.PostAsync(new CreateRockstarUnknownField {
+                FirstName = "UpdateReturn",
+                LastName = "Result",
+                Age = 20,
+                DateOfBirth = new DateTime(2001,7,1),
+                LivingStatus = LivingStatus.Dead,
+                Unknown = "Field",
+            });
+
+            var queryResponse = await client.GetAsync(new QueryRockstarsUnknownField {
+                Id = createResponse.Id,
+                Unknown = "Field",
+            });
+            
+            Assert.That(queryResponse.Results.Count, Is.EqualTo(1));
+            
+            var updateResponse = await client.PutAsync(new UpdateRockstarUnknownField {
+                Id = createResponse.Id, 
+                LastName = "UpdateResult",
+                Unknown = "Field",
+            });
+            
+            var patchResponse = await client.PatchAsync(new PatchRockstarUnknownField {
+                Id = createResponse.Id, 
+                LastName = "PatchResult",
+                Unknown = "Field",
+            });
+            
+            var deleteResponse = await client.DeleteAsync(new DeleteRockstarUnknownField {
+                Id = createResponse.Id, 
+                Unknown = "Field",
+            });
+        }
+
+        [Test]
+        public void Does_not_allow_inserting_with_default_primary_key()
+        {
+            try
+            {
+                var response = client.Post(new CreateRockstarWithId());
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException ex)
+            {
+                Assert.That(ex.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Errors[0].ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Errors[0].FieldName, Is.EqualTo(nameof(Rockstar.Id)));
+            }
+        }
+
+        [Test]
+        public async Task Does_not_allow_inserting_with_default_primary_key_Async()
+        {
+            try
+            {
+                var response = await client.PostAsync(new CreateRockstarWithId());
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException ex)
+            {
+                Assert.That(ex.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Errors[0].ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Errors[0].FieldName, Is.EqualTo(nameof(Rockstar.Id)));
+            }
+        }
+
+        [Test]
+        public void Does_apply_Audit_behavior()
+        {
+            var authClient = new JsonServiceClient(Config.ListeningOn);
+            authClient.Post(new Authenticate {
+                provider = "credentials",
+                UserName = "admin@email.com",
+                Password = "p@55wOrd",
+                RememberMe = true,
+            });
+
+            var booking1Id = authClient.Post(new CreateBooking {
+                RoomNumber = 1,
+                BookingStartDate = DateTime.Today.AddDays(1),
+                BookingEndDate = DateTime.Today.AddDays(5),
+                Cost = 100,
+            }).Id.ToInt();
+            var booking2Id = authClient.Post(new CreateBooking {
+                RoomNumber = 2,
+                BookingStartDate = DateTime.Today.AddDays(2),
+                BookingEndDate = DateTime.Today.AddDays(6),
+                Cost = 200,
+            }).Id.ToInt();
+
+            var bookings = client.Get(new QueryBookings {
+                Ids = new []{ booking1Id, booking2Id }
+            });
+            
+            // bookings.PrintDump();
+            Assert.That(bookings.Results.Count, Is.EqualTo(2));
+
+            Assert.That(bookings.Results.All(x => x.CreatedBy != null));
+            Assert.That(bookings.Results.All(x => x.CreatedDate >= DateTime.UtcNow.Date));
+            Assert.That(bookings.Results.All(x => x.ModifiedBy != null));
+            Assert.That(bookings.Results.All(x => x.ModifiedDate >= DateTime.UtcNow.Date));
+            Assert.That(bookings.Results.All(x => x.ModifiedDate == x.CreatedDate));
+
+            authClient.Patch(new UpdateBooking {
+                Id = booking1Id,
+                Cancelled = true,
+                Notes = "Missed Flight",
+            });
+            var booking1 = client.Get(new QueryBookings {
+                Ids = new[] { booking1Id }
+            }).Results[0];
+            Assert.That(booking1.Cancelled, Is.True);
+            Assert.That(booking1.Notes, Is.EqualTo("Missed Flight"));
+            Assert.That(booking1.ModifiedDate, Is.Not.EqualTo(booking1.CreatedDate));
+
+            authClient.Delete(new DeleteBooking {
+                Id = booking2Id,
+            });
+            var booking2 = client.Get(new QueryBookings {
+                Ids = new[] { booking2Id }
+            }).Results?.FirstOrDefault();
+            Assert.That(booking2, Is.Null);
+
+            using var db = appHost.Resolve<IDbConnectionFactory>().OpenDbConnection();
+            booking2 = db.SingleById<Booking>(booking2Id);
+            // booking2.PrintDump();
+            Assert.That(booking2, Is.Not.Null);
+            Assert.That(booking2.DeletedBy, Is.Not.Null);
+            Assert.That(booking2.DeletedDate, Is.Not.Null);
+            
+            authClient.Post(new Authenticate {
+                provider = "credentials",
+                UserName = "manager",
+                Password = "p@55wOrd",
+                RememberMe = true,
+            });
+            var booking3Id = authClient.Post(new CreateBooking {
+                RoomNumber = 3,
+                BookingStartDate = DateTime.Today.AddDays(3),
+                BookingEndDate = DateTime.Today.AddDays(7),
+                Cost = 100,
+            }).Id.ToInt();
+
+            var managerBookings = authClient.Get(new QueryUserBookings());
+            Assert.That(managerBookings.Results.Count, Is.EqualTo(1));
+            Assert.That(managerBookings.Results[0].RoomNumber, Is.EqualTo(3));
+
+            managerBookings = authClient.Get(new QueryUserMapBookings());
+            Assert.That(managerBookings.Results.Count, Is.EqualTo(1));
+            Assert.That(managerBookings.Results[0].RoomNumber, Is.EqualTo(3));
+
+            managerBookings = authClient.Get(new QueryEnsureUserBookings());
+            Assert.That(managerBookings.Results.Count, Is.EqualTo(1));
+            Assert.That(managerBookings.Results[0].RoomNumber, Is.EqualTo(3));
+        }
+
+        [Test]
+        public void Can_override_custom_Batch_Crud_Operation()
+        {
+            using var db = appHost.TryResolve<IDbConnectionFactory>().OpenDbConnection();
+            db.DropAndCreateTable<Booking>();
+            
+            var items = new CustomCreateBooking[] {
+                new() { RoomType = RoomType.Double, RoomNumber = 10, Cost = 100, BookingStartDate = new DateTime(2021,01,01) }, 
+                new() { RoomType = RoomType.Queen, RoomNumber = 11, Cost = 200, BookingStartDate = new DateTime(2021,01,02) }, 
+                new() { RoomType = RoomType.Single, RoomNumber = 12, Cost = 300, BookingStartDate = new DateTime(2021,01,03) }, 
+                new() { RoomType = RoomType.Suite, RoomNumber = 13, Cost = 400, BookingStartDate = new DateTime(2021,01,04) }, 
+                new() { RoomType = RoomType.Twin, RoomNumber = 14, Cost = 500, BookingStartDate = new DateTime(2021,01,05) }, 
+            };
+
+            var authClient = new JsonServiceClient(Config.ListeningOn);
+            authClient.Post(new Authenticate {
+                provider = "credentials",
+                UserName = "admin@email.com",
+                Password = "p@55wOrd",
+                RememberMe = true,
+            });
+
+            var responses = authClient.SendAll(items);
+            var responseIds = responses.Map(x => x.Id.ToInt());
+            var results = db.SelectByIds<Booking>(responseIds);
+            Assert.That(results.Map(x => x.RoomNumber), Is.EquivalentTo(new[]{ 10, 11, 12, 13, 14 }));
+            
+            db.DropAndCreateTable<Booking>();
+
+            items[2].RoomNumber = 0; //Validation Error
+            try
+            {
+                responses = authClient.SendAll(items);
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException e)
+            {
+                Assert.That(e.Message, Is.EqualTo("'Room Number' must be greater than '0'."));
+            }
+            Assert.That(db.SelectByIds<Booking>(responseIds).Count, Is.EqualTo(0));
+            
+            items[2].RoomNumber = 500; //DB Check Constraint Error
+            try
+            {
+                responses = authClient.SendAll(items);
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException e)
+            {
+                Assert.That(e.Message, Does.Contain("CHECK constraint failed"));
+            }
+            Assert.That(db.SelectByIds<Booking>(responseIds).Count, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void Does_execute_AutoBatch_CRUD_Create_Operation()
+        {
+            using var db = appHost.TryResolve<IDbConnectionFactory>().OpenDbConnection();
+            db.DropAndCreateTable<Booking>();
+            
+            var items = new CreateBooking[] {
+                new() { RoomType = RoomType.Double, RoomNumber = 10, Cost = 100, BookingStartDate = new DateTime(2021,01,01) }, 
+                new() { RoomType = RoomType.Queen, RoomNumber = 11, Cost = 200, BookingStartDate = new DateTime(2021,01,02) }, 
+                new() { RoomType = RoomType.Single, RoomNumber = 12, Cost = 300, BookingStartDate = new DateTime(2021,01,03) }, 
+                new() { RoomType = RoomType.Suite, RoomNumber = 13, Cost = 400, BookingStartDate = new DateTime(2021,01,04) }, 
+                new() { RoomType = RoomType.Twin, RoomNumber = 14, Cost = 500, BookingStartDate = new DateTime(2021,01,05) }, 
+            };
+            
+            var authClient = new JsonServiceClient(Config.ListeningOn);
+            authClient.Post(new Authenticate {
+                provider = "credentials",
+                UserName = "admin@email.com",
+                Password = "p@55wOrd",
+                RememberMe = true,
+            });
+
+            var responses = authClient.SendAll(items);
+            var responseIds = responses.Map(x => x.Id.ToInt());
+            var results = db.SelectByIds<Booking>(responseIds);
+            Assert.That(results.Map(x => x.RoomNumber), Is.EquivalentTo(new[]{ 10, 11, 12, 13, 14 }));
+            
+            db.DropAndCreateTable<Booking>();
+
+            items[2].RoomNumber = 0; //Validation Error
+            try
+            {
+                responses = authClient.SendAll(items);
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException e)
+            {
+                Assert.That(e.Message, Is.EqualTo("'Room Number' must be greater than '0'."));
+            }
+            Assert.That(db.SelectByIds<Booking>(responseIds).Count, Is.EqualTo(0));
+            
+            items[2].RoomNumber = 500; //DB Check Constraint Error
+            try
+            {
+                responses = authClient.SendAll(items);
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException e)
+            {
+                Assert.That(e.Message, Does.Contain("CHECK constraint failed"));
+            }
+            Assert.That(db.SelectByIds<Booking>(responseIds).Count, Is.EqualTo(0));
         }
     }
 }

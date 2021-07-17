@@ -952,21 +952,20 @@ Total    1550
             var context = new ScriptContext().Init();
             
             Assert.That(context.EvaluateScript(@"
-{{ ['A','B','C'] |> assignTo: items }}
-{{ 'Y' |> if(!contains(items, 'A')) |> otherwise('N') }}").Trim(), Is.EqualTo("N"));
+{{ var items = ['A','B','C'] }}
+{{ !items.contains('A') |> iif('Y','N') }}").Trim(), Is.EqualTo("N"));
 
             Assert.That(context.EvaluateScript(@"
-{{ ['A','B','C'] |> assignTo: items }}
-{{ 'Y' |> if(!contains(items, 'D')) |> otherwise('N') }}").Trim(), Is.EqualTo("Y"));
+{{ var items = ['A','B','C'] }}
+{{ 'Y' |> ifElse(!items.contains('D'), 'N') }}").Trim(), Is.EqualTo("Y"));
 
             Assert.That(context.EvaluateScript(@"
-{{ ['A','B','C'] |> assignTo: items }}
-{{ 'Y' |> if(not(contains(items, 'D'))) |> otherwise('N') }}").Trim(), Is.EqualTo("Y"));
+{{ var items = ['A','B','C'] }}
+{{ 'Y' |> ifElse(not(items.contains('D')),'N') }}").Trim(), Is.EqualTo("Y"));
 
             Assert.That(context.EvaluateScript(@"
-{{ ['A','B','C'] |> assignTo: items }}
-{{ ['B','C','D'] |> where: !contains(items,it) 
-   |> first }}").Trim(), Is.EqualTo("D"));
+{{ var items = ['A','B','C'] }}
+{{ ['B','C','D'] |> where => !items.contains(it) |> first }}").Trim(), Is.EqualTo("D"));
         }
 
         [Test]
@@ -2084,6 +2083,38 @@ dir-file: dir/dir-file.txt
         {
             var context = new ScriptContext().Init();
             Assert.That(context.Evaluate("{{ flatten([[1,2],[3,4]]) |> return }}"), Is.EqualTo(new[]{ 1, 2, 3, 4 }));
+        }
+
+        [Test]
+        public void Can_removeKeyFromDictionary()
+        {
+            var context = new ScriptContext().Init();
+            var output = context.RenderScript(@"```code|q
+sample = {}
+sample.myKey1 = 1
+sample.myKey2 = 2
+sample |> remove('myKey1')
+sample |> removeKeyFromDictionary('myKey2')
+```
+{{ sample.myKey }}".NormalizeNewLines());
+            
+            Assert.That(output, Is.EqualTo(""));
+        }
+
+        [Test]
+        public void Can_use_ownProps()
+        {
+            var context = new ScriptContext().Init();
+
+            var output = context.RenderScript(@"
+{{#partial test}}
+{{ it |> ownProps |> map => it.Key |> jsv }}|{{ it.ownProps().map(x => x.Key).jsv() }}
+{{/partial}}
+{{ 'test' | partial({ A:1, B:2 }) }}".NormalizeNewLines());
+
+            output.Print();
+            
+            Assert.That(output.NormalizeNewLines(), Is.EqualTo("[A,B]|[A,B]"));
         }
 
     }

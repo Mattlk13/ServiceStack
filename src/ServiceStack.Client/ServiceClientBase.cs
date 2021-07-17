@@ -298,7 +298,7 @@ namespace ServiceStack
 
         /// <summary>
         /// Gets or sets authentication information for the request.
-        /// Warning: It's recommened to use <see cref="UserName"/> and <see cref="Password"/> for basic auth.
+        /// Warning: It's recommend to use <see cref="UserName"/> and <see cref="Password"/> for basic auth.
         /// This property is only used for IIS level authentication.
         /// </summary>
         public ICredentials Credentials
@@ -339,12 +339,7 @@ namespace ServiceStack
         }
         private CookieContainer cookieContainer;
 
-        public bool AllowAutoRedirect
-        {
-            get => allowAutoRedirect;
-            set => allowAutoRedirect = value;
-        }
-        private bool allowAutoRedirect = true;
+        public bool AllowAutoRedirect { get; set; } = true;
 
         /// <summary>
         /// Called before request resend, when the initial request required authentication
@@ -504,7 +499,7 @@ namespace ServiceStack
             SerializeRequestToStream(request, stream);
         }
 
-        public abstract void SerializeToStream(IRequest requestContext, object request, Stream stream);
+        public abstract void SerializeToStream(IRequest req, object request, Stream stream);
 
         public abstract T DeserializeFromStream<T>(Stream stream);
 
@@ -551,6 +546,24 @@ namespace ServiceStack
             }
         }
 
+        public static string ToHttpMethod(Type requestType)
+        {
+            if (requestType.IsOrHasGenericInterfaceTypeOf(typeof(ICreateDb<>)))
+                return HttpMethods.Post;
+            if (requestType.IsOrHasGenericInterfaceTypeOf(typeof(IUpdateDb<>)))
+                return HttpMethods.Put;
+            if (requestType.IsOrHasGenericInterfaceTypeOf(typeof(IDeleteDb<>)))
+                return HttpMethods.Delete;
+            if (requestType.IsOrHasGenericInterfaceTypeOf(typeof(IPatchDb<>)))
+                return HttpMethods.Patch;
+            if (requestType.IsOrHasGenericInterfaceTypeOf(typeof(ISaveDb<>)))
+                return HttpMethods.Post;
+            if (typeof(IQuery).IsAssignableFrom(requestType))
+                return HttpMethods.Get;
+
+            return null;
+        }
+
         public virtual TResponse Send<TResponse>(object request)
         {
             if (typeof(TResponse) == typeof(object))
@@ -568,6 +581,24 @@ namespace ServiceStack
                     return Delete<TResponse>(request);
                 if (request is IPatch)
                     return Patch<TResponse>(request);
+            }
+
+            if (request is IQuery)
+                return Get<TResponse>(request);
+            if (request is ICrud)
+            {
+                var crudMethod = ToHttpMethod(request.GetType());
+                if (crudMethod != null)
+                {
+                    return crudMethod switch {
+                        HttpMethods.Post => Post<TResponse>(request),
+                        HttpMethods.Put => Put<TResponse>(request),
+                        HttpMethods.Delete => Delete<TResponse>(request),
+                        HttpMethods.Patch => Patch<TResponse>(request),
+                        HttpMethods.Get => Get<TResponse>(request),
+                        _ => throw new NotSupportedException("Unknown " + crudMethod),
+                    };
+                }
             }
 
             var httpMethod = HttpMethod ?? DefaultHttpMethod;
@@ -628,14 +659,17 @@ namespace ServiceStack
             var webEx = ex as WebException;
             try
             {
+                var hasRefreshTokenCookie = this.GetRefreshTokenCookie() != null;
+                var hasRefreshToken = refreshToken != null || hasRefreshTokenCookie;
+                
                 if (WebRequestUtils.ShouldAuthenticate(webEx,
                     (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
                     || credentials != null
                     || bearerToken != null
-                    || refreshToken != null
+                    || hasRefreshToken
                     || OnAuthenticationRequired != null))
                 {
-                    if (RefreshToken != null)
+                    if (hasRefreshToken)
                     {
                         var refreshRequest = new GetAccessToken {
                             RefreshToken = RefreshToken,
@@ -652,7 +686,7 @@ namespace ServiceStack
                         try
                         {
                             tokenResponse = uri.PostJsonToUrl(refreshRequest, requestFilter: req => {
-                                if (UseTokenCookie) {
+                                if (UseTokenCookie || hasRefreshTokenCookie) {
                                     req.CookieContainer = CookieContainer;
                                 }
                             }).FromJson<GetAccessTokenResponse>();
@@ -865,29 +899,23 @@ namespace ServiceStack
 
         protected virtual WebRequest SendRequest(string httpMethod, string requestUri, object request)
         {
-            return PrepareWebRequest(httpMethod, requestUri, request, client =>
-            {
-                using (var requestStream = PclExport.Instance.GetRequestStream(client))
-                {
-                    SerializeRequestToStream(request, requestStream);
-                }
+            return PrepareWebRequest(httpMethod, requestUri, request, client => {
+                using var requestStream = PclExport.Instance.GetRequestStream(client);
+                SerializeRequestToStream(request, requestStream);
             });
         }
         
         protected virtual void SerializeRequestToStream(object request, Stream requestStream, bool keepOpen=false)
         {
-            var str = request as string;
-            var bytes = request as byte[];
-            var stream = request as Stream;
-            if (str != null)
+            if (request is string str)
             {
                 requestStream.Write(str);
             }
-            else if (bytes != null)
+            else if (request is byte[] bytes)
             {
                 requestStream.Write(bytes, 0, bytes.Length);
             }
-            else if (stream != null)
+            else if (request is Stream stream)
             {
                 stream.WriteTo(requestStream);
             }
@@ -996,15 +1024,22 @@ namespace ServiceStack
             GlobalRequestFilter?.Invoke(client);
         }
 
-        private byte[] DownloadBytes(string httpMethod, string requestUri, object request)
+        public byte[] DownloadBytes(string httpMethod, string requestUri, object request)
         {
             var webRequest = SendRequest(httpMethod, requestUri, request);
-            using (var response = webRequest.GetResponse())
-            {
-                ApplyWebResponseFilters(response);
-                using (var stream = response.ResponseStream())
-                    return stream.ReadFully();
-            }
+            using var response = webRequest.GetResponse();
+            ApplyWebResponseFilters(response);
+            using var stream = response.ResponseStream();
+            return stream.ReadFully();
+        }
+
+        public async Task<byte[]> DownloadBytesAsync(string httpMethod, string requestUri, object request)
+        {
+            var webRequest = SendRequest(httpMethod, requestUri, request);
+            using var response = await webRequest.GetResponseAsync();
+            ApplyWebResponseFilters(response);
+            using var stream = response.ResponseStream();
+            return await stream.ReadFullyAsync();
         }
 
         public virtual void Publish(object requestDto)
@@ -1105,24 +1140,23 @@ namespace ServiceStack
             }
         }
 
-        public virtual Task<TResponse> SendAsync<TResponse>(object request, CancellationToken token)
+        public virtual async Task<TResponse> SendAsync<TResponse>(object request, CancellationToken token = default)
         {
             if (typeof(TResponse) == typeof(object))
-                return this.SendAsync(this.GetResponseType(request), request, token)
-                    .ContinueWith(t => (TResponse)t.Result, token);
+                return (TResponse) await this.SendAsync(this.GetResponseType(request), request, token);
 
             if (request is IVerb)
             {
                 if (request is IGet)
-                    return GetAsync<TResponse>(request);
+                    return await GetAsync<TResponse>(request, token);
                 if (request is IPost)
-                    return PostAsync<TResponse>(request);
+                    return await PostAsync<TResponse>(request, token);
                 if (request is IPut)
-                    return PutAsync<TResponse>(request);
+                    return await PutAsync<TResponse>(request, token);
                 if (request is IDelete)
-                    return DeleteAsync<TResponse>(request);
+                    return await DeleteAsync<TResponse>(request, token);
                 if (request is IPatch)
-                    return PatchAsync<TResponse>(request);
+                    return await PatchAsync<TResponse>(request, token);
             }
 
             var httpMethod = HttpMethod ?? DefaultHttpMethod;
@@ -1130,7 +1164,7 @@ namespace ServiceStack
                  ? this.SyncReplyBaseUri.WithTrailingSlash() + request.GetType().Name
                  : Format + "/reply/" + request.GetType().Name);
 
-            return asyncClient.SendAsync<TResponse>(httpMethod, requestUri, request, token);
+            return await asyncClient.SendAsync<TResponse>(httpMethod, requestUri, request, token);
         }
 
         public Task<List<TResponse>> SendAllAsync<TResponse>(IEnumerable<object> requests, CancellationToken token)
@@ -1155,148 +1189,143 @@ namespace ServiceStack
             return asyncClient.SendAsync<byte[]>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, requestUri), requests, token);
         }
 
-        public virtual Task<TResponse> SendAsync<TResponse>(object request)
-        {
-            return SendAsync<TResponse>(request, default(CancellationToken));
-        }
 
-
-        public Task<TResponse> SendAsync<TResponse>(string httpMethod, string absoluteUrl, object request, CancellationToken token = default(CancellationToken))
+        public Task<TResponse> SendAsync<TResponse>(string httpMethod, string absoluteUrl, object request, CancellationToken token = default)
         {
             return asyncClient.SendAsync<TResponse>(httpMethod, absoluteUrl, request, token);
         }
 
-        public virtual Task<TResponse> GetAsync<TResponse>(IReturn<TResponse> requestDto)
+        public virtual Task<TResponse> GetAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null, token);
         }
 
-        public virtual Task<TResponse> GetAsync<TResponse>(object requestDto)
+        public virtual Task<TResponse> GetAsync<TResponse>(object requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null, token);
         }
 
-        public virtual Task<TResponse> GetAsync<TResponse>(string relativeOrAbsoluteUrl)
+        public virtual Task<TResponse> GetAsync<TResponse>(string relativeOrAbsoluteUrl, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveUrl(HttpMethods.Get, relativeOrAbsoluteUrl), null);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Get, ResolveUrl(HttpMethods.Get, relativeOrAbsoluteUrl), null, token);
         }
 
-        public virtual Task GetAsync(IReturnVoid requestDto)
+        public virtual Task GetAsync(IReturnVoid requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<byte[]>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null);
-        }
-
-
-        public virtual Task<TResponse> DeleteAsync<TResponse>(IReturn<TResponse> requestDto)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null);
-        }
-
-        public virtual Task<TResponse> DeleteAsync<TResponse>(object requestDto)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null);
-        }
-
-        public virtual Task<TResponse> DeleteAsync<TResponse>(string relativeOrAbsoluteUrl)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveUrl(HttpMethods.Delete, relativeOrAbsoluteUrl), null);
-        }
-
-        public virtual Task DeleteAsync(IReturnVoid requestDto)
-        {
-            return asyncClient.SendAsync<byte[]>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null);
+            return asyncClient.SendAsync<byte[]>(HttpMethods.Get, ResolveTypedUrl(HttpMethods.Get, requestDto), null, token);
         }
 
 
-        public virtual Task<TResponse> PostAsync<TResponse>(IReturn<TResponse> requestDto)
+        public virtual Task<TResponse> DeleteAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null, token);
         }
 
-        public virtual Task<TResponse> PostAsync<TResponse>(object requestDto)
+        public virtual Task<TResponse> DeleteAsync<TResponse>(object requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null, token);
         }
 
-        public virtual Task<TResponse> PostAsync<TResponse>(string relativeOrAbsoluteUrl, object request)
+        public virtual Task<TResponse> DeleteAsync<TResponse>(string relativeOrAbsoluteUrl, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), request);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Delete, ResolveUrl(HttpMethods.Delete, relativeOrAbsoluteUrl), null, token);
         }
 
-        public virtual Task PostAsync(IReturnVoid requestDto)
+        public virtual Task DeleteAsync(IReturnVoid requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<byte[]>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto);
-        }
-
-
-        public virtual Task<TResponse> PutAsync<TResponse>(IReturn<TResponse> requestDto)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
-        }
-
-        public virtual Task<TResponse> PutAsync<TResponse>(object requestDto)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
-        }
-
-        public virtual Task<TResponse> PutAsync<TResponse>(string relativeOrAbsoluteUrl, object request)
-        {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveUrl(HttpMethods.Put, relativeOrAbsoluteUrl), request);
-        }
-
-        public virtual Task PutAsync(IReturnVoid requestDto)
-        {
-            return asyncClient.SendAsync<byte[]>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto);
+            return asyncClient.SendAsync<byte[]>(HttpMethods.Delete, ResolveTypedUrl(HttpMethods.Delete, requestDto), null, token);
         }
 
 
-        public virtual Task<TResponse> PatchAsync<TResponse>(IReturn<TResponse> requestDto)
+        public virtual Task<TResponse> PostAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto, token);
         }
 
-        public virtual Task<TResponse> PatchAsync<TResponse>(object requestDto)
+        public virtual Task<TResponse> PostAsync<TResponse>(object requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto, token);
         }
 
-        public virtual Task<TResponse> PatchAsync<TResponse>(string relativeOrAbsoluteUrl, object request)
+        public virtual Task<TResponse> PostAsync<TResponse>(string relativeOrAbsoluteUrl, object request, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveUrl(HttpMethods.Patch, relativeOrAbsoluteUrl), request);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Post, ResolveUrl(HttpMethods.Post, relativeOrAbsoluteUrl), request, token);
         }
 
-        public virtual Task PatchAsync(IReturnVoid requestDto)
+        public virtual Task PostAsync(IReturnVoid requestDto, CancellationToken token = default)
         {
-            return asyncClient.SendAsync<byte[]>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto);
+            return asyncClient.SendAsync<byte[]>(HttpMethods.Post, ResolveTypedUrl(HttpMethods.Post, requestDto), requestDto, token);
         }
 
 
-        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, IReturn<TResponse> requestDto)
+        public virtual Task<TResponse> PutAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token = default)
         {
-            return CustomMethodAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto, token);
         }
 
-        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, object requestDto)
+        public virtual Task<TResponse> PutAsync<TResponse>(object requestDto, CancellationToken token = default)
         {
-            return CustomMethodAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestDto);
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto, token);
         }
 
-        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, string relativeOrAbsoluteUrl, object request)
+        public virtual Task<TResponse> PutAsync<TResponse>(string relativeOrAbsoluteUrl, object request, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Put, ResolveUrl(HttpMethods.Put, relativeOrAbsoluteUrl), request, token);
+        }
+
+        public virtual Task PutAsync(IReturnVoid requestDto, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<byte[]>(HttpMethods.Put, ResolveTypedUrl(HttpMethods.Put, requestDto), requestDto, token);
+        }
+
+
+        public virtual Task<TResponse> PatchAsync<TResponse>(IReturn<TResponse> requestDto, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
+        }
+
+        public virtual Task<TResponse> PatchAsync<TResponse>(object requestDto, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
+        }
+
+        public virtual Task<TResponse> PatchAsync<TResponse>(string relativeOrAbsoluteUrl, object request, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<TResponse>(HttpMethods.Patch, ResolveUrl(HttpMethods.Patch, relativeOrAbsoluteUrl), request, token);
+        }
+
+        public virtual Task PatchAsync(IReturnVoid requestDto, CancellationToken token = default)
+        {
+            return asyncClient.SendAsync<byte[]>(HttpMethods.Patch, ResolveTypedUrl(HttpMethods.Patch, requestDto), requestDto, token);
+        }
+
+
+        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, IReturn<TResponse> requestDto, CancellationToken token = default)
+        {
+            return CustomMethodAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestDto, token);
+        }
+
+        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, object requestDto, CancellationToken token = default)
+        {
+            return CustomMethodAsync<TResponse>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestDto, token);
+        }
+
+        public virtual Task<TResponse> CustomMethodAsync<TResponse>(string httpVerb, string relativeOrAbsoluteUrl, object request, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
 
             var requestBody = HttpUtils.HasRequestBody(httpVerb) ? request : null;
-            return asyncClient.SendAsync<TResponse>(httpVerb, ResolveUrl(httpVerb, relativeOrAbsoluteUrl), requestBody);
+            return asyncClient.SendAsync<TResponse>(httpVerb, ResolveUrl(httpVerb, relativeOrAbsoluteUrl), requestBody, token);
         }
 
-        public virtual Task CustomMethodAsync(string httpVerb, IReturnVoid requestDto)
+        public virtual Task CustomMethodAsync(string httpVerb, IReturnVoid requestDto, CancellationToken token = default)
         {
             if (!HttpMethods.Exists(httpVerb))
                 throw new NotSupportedException("Unknown HTTP Method is not supported: " + httpVerb);
 
             var requestBody = HttpUtils.HasRequestBody(httpVerb) ? requestDto : null;
-            return asyncClient.SendAsync<byte[]>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestBody);
+            return asyncClient.SendAsync<byte[]>(httpVerb, ResolveTypedUrl(httpVerb, requestDto), requestBody, token);
         }
 
         public virtual TResponse Send<TResponse>(string httpMethod, string relativeOrAbsoluteUrl, object request)
@@ -1646,44 +1675,42 @@ namespace ServiceStack
                 webRequest.ContentType = "multipart/form-data; boundary=\"" + boundary + "\"";
                 boundary = "--" + boundary;
                 var newLine = "\r\n";
-                using (var outputStream = PclExport.Instance.GetRequestStream(webRequest))
+                using var outputStream = PclExport.Instance.GetRequestStream(webRequest);
+                foreach (var key in nameValueCollection.AllKeys)
                 {
-                    foreach (var key in nameValueCollection.AllKeys)
-                    {
-                        outputStream.Write(boundary + newLine);
-                        outputStream.Write($"Content-Disposition: form-data;name=\"{key}\"{newLine}");
-                        outputStream.Write($"Content-Type: text/plain;charset=utf-8{newLine}{newLine}");
-                        outputStream.Write(nameValueCollection[key] + newLine);
-                    }
+                    outputStream.Write(boundary + newLine);
+                    outputStream.Write($"Content-Disposition: form-data;name=\"{key}\"{newLine}");
+                    outputStream.Write($"Content-Type: text/plain;charset=utf-8{newLine}{newLine}");
+                    outputStream.Write(nameValueCollection[key] + newLine);
+                }
 
-                    var buffer = new byte[4096];
-                    for (fileCount = 0; fileCount < files.Length; fileCount++)
-                    {
-                        var file = files[fileCount];
-                        currentStreamPosition = file.Stream.Position;
-                        outputStream.Write(boundary + newLine);
-                        var fileName = file.FileName ?? $"upload{fileCount}";
-                        var fieldName = file.FieldName ?? $"upload{fileCount}";
-                        var contentType = file.ContentType ?? (file.FileName != null ? MimeTypes.GetMimeType(file.FileName) : null) ?? "application/octet-stream";
-                        outputStream.Write($"Content-Disposition: form-data;name=\"{fieldName}\";filename=\"{fileName}\"{newLine}Content-Type: {contentType}{newLine}{newLine}");
+                var buffer = new byte[4096];
+                for (fileCount = 0; fileCount < files.Length; fileCount++)
+                {
+                    var file = files[fileCount];
+                    currentStreamPosition = file.Stream.Position;
+                    outputStream.Write(boundary + newLine);
+                    var fileName = file.FileName ?? $"upload{fileCount}";
+                    var fieldName = file.FieldName ?? $"upload{fileCount}";
+                    var contentType = file.ContentType ?? (file.FileName != null ? MimeTypes.GetMimeType(file.FileName) : null) ?? "application/octet-stream";
+                    outputStream.Write($"Content-Disposition: form-data;name=\"{fieldName}\";filename=\"{fileName}\"{newLine}Content-Type: {contentType}{newLine}{newLine}");
 
-                        int byteCount;
-                        int bytesWritten = 0;
-                        while ((byteCount = file.Stream.Read(buffer, 0, 4096)) > 0)
+                    int byteCount;
+                    int bytesWritten = 0;
+                    while ((byteCount = file.Stream.Read(buffer, 0, 4096)) > 0)
+                    {
+                        outputStream.Write(buffer, 0, byteCount);
+
+                        if (OnUploadProgress != null)
                         {
-                            outputStream.Write(buffer, 0, byteCount);
-
-                            if (OnUploadProgress != null)
-                            {
-                                bytesWritten += byteCount;
-                                OnUploadProgress(bytesWritten, file.Stream.Length);
-                            }
+                            bytesWritten += byteCount;
+                            OnUploadProgress(bytesWritten, file.Stream.Length);
                         }
-
-                        outputStream.Write(newLine);
-                        if (fileCount == files.Length - 1) 
-                            outputStream.Write(boundary + "--");
                     }
+
+                    outputStream.Write(newLine);
+                    if (fileCount == files.Length - 1) 
+                        outputStream.Write(boundary + "--");
                 }
 
                 return webRequest;
@@ -1733,34 +1760,32 @@ namespace ServiceStack
                 webRequest.ContentType = "multipart/form-data; boundary=" + boundary;
                 boundary = "--" + boundary;
                 var newLine = "\r\n";
-                using (var outputStream = PclExport.Instance.GetRequestStream(webRequest))
+                using var outputStream = PclExport.Instance.GetRequestStream(webRequest);
+                foreach (var key in nameValueCollection.AllKeys)
                 {
-                    foreach (var key in nameValueCollection.AllKeys)
-                    {
-                        outputStream.Write(boundary + newLine);
-                        outputStream.Write($"Content-Disposition: form-data;name=\"{key}\"{newLine}");
-                        outputStream.Write($"Content-Type: text/plain;charset=utf-8{newLine}{newLine}");
-                        outputStream.Write(nameValueCollection[key] + newLine);
-                    }
-
                     outputStream.Write(boundary + newLine);
-                    outputStream.Write($"Content-Disposition: form-data;name=\"{fieldName}\";filename=\"{fileName}\"{newLine}{newLine}");
-                    var buffer = new byte[4096];
-                    int byteCount;
-                    int bytesWritten = 0;
-                    while ((byteCount = fileToUpload.Read(buffer, 0, 4096)) > 0)
-                    {
-                        outputStream.Write(buffer, 0, byteCount);
-
-                        if (OnUploadProgress != null)
-                        {
-                            bytesWritten += byteCount;
-                            OnUploadProgress(bytesWritten, fileToUpload.Length);
-                        }
-                    }
-                    outputStream.Write(newLine);
-                    outputStream.Write(boundary + "--");
+                    outputStream.Write($"Content-Disposition: form-data;name=\"{key}\"{newLine}");
+                    outputStream.Write($"Content-Type: text/plain;charset=utf-8{newLine}{newLine}");
+                    outputStream.Write(nameValueCollection[key] + newLine);
                 }
+
+                outputStream.Write(boundary + newLine);
+                outputStream.Write($"Content-Disposition: form-data;name=\"{fieldName}\";filename=\"{fileName}\"{newLine}{newLine}");
+                var buffer = new byte[4096];
+                int byteCount;
+                int bytesWritten = 0;
+                while ((byteCount = fileToUpload.Read(buffer, 0, 4096)) > 0)
+                {
+                    outputStream.Write(buffer, 0, byteCount);
+
+                    if (OnUploadProgress != null)
+                    {
+                        bytesWritten += byteCount;
+                        OnUploadProgress(bytesWritten, fileToUpload.Length);
+                    }
+                }
+                outputStream.Write(newLine);
+                outputStream.Write(boundary + "--");
 
                 return webRequest;
             }
@@ -1857,20 +1882,18 @@ namespace ServiceStack
                 return (TResponse)(object)webResponse.ResponseStream();
             }
 
-            using (var responseStream = webResponse.ResponseStream())
+            using var responseStream = webResponse.ResponseStream();
+            if (typeof(TResponse) == typeof(string))
             {
-                if (typeof(TResponse) == typeof(string))
-                {
-                    return (TResponse)(object)responseStream.ReadToEnd();
-                }
-                if (typeof(TResponse) == typeof(byte[]))
-                {
-                    return (TResponse)(object)responseStream.ReadFully();
-                }
-
-                var response = DeserializeFromStream<TResponse>(responseStream);
-                return response;
+                return (TResponse)(object)responseStream.ReadToEnd();
             }
+            if (typeof(TResponse) == typeof(byte[]))
+            {
+                return (TResponse)(object)responseStream.ReadFully();
+            }
+
+            var response = DeserializeFromStream<TResponse>(responseStream);
+            return response;
         }
 
         public void Dispose() { }
@@ -1890,10 +1913,8 @@ namespace ServiceStack
         public static TResponse PostFile<TResponse>(this IRestClient client,
             string relativeOrAbsoluteUrl, FileInfo fileToUpload, string mimeType)
         {
-            using (FileStream fileStream = fileToUpload.OpenRead())
-            {
-                return client.PostFile<TResponse>(relativeOrAbsoluteUrl, fileStream, fileToUpload.Name, mimeType);
-            }
+            using var fileStream = fileToUpload.OpenRead();
+            return client.PostFile<TResponse>(relativeOrAbsoluteUrl, fileStream, fileToUpload.Name, mimeType);
         }
 
         public static TResponse PostFileWithRequest<TResponse>(this IRestClient client,
@@ -1905,10 +1926,8 @@ namespace ServiceStack
         public static TResponse PostFileWithRequest<TResponse>(this IRestClient client,
             string relativeOrAbsoluteUrl, FileInfo fileToUpload, object request, string fieldName = "upload")
         {
-            using (FileStream fileStream = fileToUpload.OpenRead())
-            {
-                return client.PostFileWithRequest<TResponse>(relativeOrAbsoluteUrl, fileStream, fileToUpload.Name, request, fieldName);
-            }
+            using var fileStream = fileToUpload.OpenRead();
+            return client.PostFileWithRequest<TResponse>(relativeOrAbsoluteUrl, fileStream, fileToUpload.Name, request, fieldName);
         }
 
         public static void PopulateRequestMetadatas(this IHasSessionId client, IEnumerable<object> requests)
@@ -1941,7 +1960,7 @@ namespace ServiceStack
         public static Dictionary<string, string> ToDictionary(this CookieContainer cookies, string baseUri)
         {
             var to = new Dictionary<string, string>();
-            if (cookies == null)
+            if (cookies == null || baseUri == null)
                 return to;
 
             foreach (Cookie cookie in cookies.GetCookies(new Uri(baseUri)))
@@ -2080,9 +2099,21 @@ namespace ServiceStack
             return token;
         }
 
+        public static string GetRefreshTokenCookie(this IServiceClient client)
+        {
+            client.GetCookieValues().TryGetValue("ss-reftok", out var token);
+            return token;
+        }
+
         public static string GetTokenCookie(this CookieContainer cookies, string baseUri)
         {
             cookies.ToDictionary(baseUri).TryGetValue("ss-tok", out var token);
+            return token;
+        }
+
+        public static string GetRefreshTokenCookie(this CookieContainer cookies, string baseUri)
+        {
+            cookies.ToDictionary(baseUri).TryGetValue("ss-reftok", out var token);
             return token;
         }
 
@@ -2094,6 +2125,14 @@ namespace ServiceStack
             client.SetCookie("ss-tok", token, expiresIn: TimeSpan.FromDays(365 * 20));
         }
 
+        public static void SetRefreshTokenCookie(this IServiceClient client, string token)
+        {
+            if (token == null)
+                return;
+
+            client.SetCookie("ss-reftok", token, expiresIn: TimeSpan.FromDays(365 * 20));
+        }
+
         public static void SetTokenCookie(this CookieContainer cookies, string baseUri, string token)
         {
             if (token == null)
@@ -2102,6 +2141,24 @@ namespace ServiceStack
             cookies.SetCookie(new Uri(baseUri), "ss-tok", token,
                 expiresAt: DateTime.UtcNow.Add(TimeSpan.FromDays(365 * 20)));
         }
+
+        public static void SetRefreshTokenCookie(this CookieContainer cookies, string baseUri, string token)
+        {
+            if (token == null)
+                return;
+
+            cookies.SetCookie(new Uri(baseUri), "ss-reftok", token,
+                expiresAt: DateTime.UtcNow.Add(TimeSpan.FromDays(365 * 20)));
+        }
+
+        public static string GetCookieValue(this AsyncServiceClient client, string name) =>
+            client.GetCookieValues().TryGetValue(name, out var token) ? token : null;
+
+        public static string GetTokenCookie(this AsyncServiceClient client) =>
+            client.GetCookieValues().TryGetValue("ss-tok", out var token) ? token : null;
+
+        public static string GetRefreshTokenCookie(this AsyncServiceClient client) =>
+            client.GetCookieValues().TryGetValue("ss-reftok", out var token) ? token : null;
 
         public static void SetUserAgent(this HttpWebRequest req, string userAgent)
         {

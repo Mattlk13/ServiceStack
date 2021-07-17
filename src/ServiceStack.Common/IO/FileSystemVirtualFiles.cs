@@ -149,6 +149,26 @@ namespace ServiceStack.IO
             {
                 Directory.Delete(path, true);
             }
-        }        
+        }
+
+        public static string AssertDirectory(string dirPath, int timeoutMs=1000)
+        {
+            if (string.IsNullOrEmpty(dirPath))
+                return null;
+
+            try
+            {
+                ExecUtils.RetryOnException(() => {
+                    if (!Directory.Exists(dirPath))
+                        Directory.CreateDirectory(dirPath);
+                }, TimeSpan.FromMilliseconds(timeoutMs));
+                return dirPath;
+            }
+            catch (TimeoutException e)
+            {
+                throw e.InnerException ?? e;
+            }
+        }
+        
     }
 }

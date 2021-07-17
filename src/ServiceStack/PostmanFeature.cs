@@ -8,8 +8,9 @@ using ServiceStack.Web;
 
 namespace ServiceStack
 {
-    public class PostmanFeature : IPlugin
+    public class PostmanFeature : IPlugin, Model.IHasStringId
     {
+        public string Id { get; set; } = Plugins.Postman;
         public string AtRestPath { get; set; }
         public bool? EnableSessionExport { get; set; }
         public string Headers { get; set; }
@@ -51,7 +52,7 @@ namespace ServiceStack
         }
     }
 
-    [Exclude(Feature.Soap)]
+    [ExcludeMetadata]
     public class Postman
     {
         public List<string> Label { get; set; }
@@ -177,7 +178,7 @@ namespace ServiceStack
                         .SelectMany(x => x == ActionContext.AnyAction
                         ? feature.DefaultVerbsForAny
                         : new List<string> { x })
-                    .ToHashSet();
+                    .ToSet();
 
                 var propertyTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 op.RequestType.GetSerializableFields()

@@ -104,13 +104,6 @@ namespace ServiceStack.RabbitMq
         /// </summary>
         public string[] PriorityQueuesWhitelist { get; set; }
 
-        [Obsolete("Use PriorityQueuesWhitelist")]
-        public string[] PriortyQueuesWhitelist
-        {
-            get => PriorityQueuesWhitelist;
-            set => PriorityQueuesWhitelist = value;
-        }
-
         /// <summary>
         /// Don't listen on any Priority Queues
         /// </summary>
@@ -146,10 +139,9 @@ namespace ServiceStack.RabbitMq
         {
             set => PublishToOutqWhitelist = value ? TypeConstants.EmptyStringArray : null;
         }
-
         
         private IConnection connection;
-        private IConnection Connection => connection ?? (connection = ConnectionFactory.CreateConnection());
+        private IConnection Connection => connection ??= ConnectionFactory.CreateConnection();
 
         private readonly Dictionary<Type, IMessageHandlerFactory> handlerMap
             = new Dictionary<Type, IMessageHandlerFactory>();

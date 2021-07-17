@@ -80,29 +80,35 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         public string Required { get; set; }
     }
 
+    public class SGSyncPostValidationAsyncExternal : IReturn<SGSyncPostValidationAsyncExternal>
+    {
+        public string Value { get; set; }
+        public string Required { get; set; }
+    }
+
     public class ServiceGatewayServices : Service
     {
         public object Any(SGSendSyncGetInternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncGetInternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncGetInternal);
             return Gateway.Send(request.ConvertTo<SGSyncGetInternal>());
         }
 
         public object Any(SGSendSyncGetExternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncGetExternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncGetExternal);
             return Gateway.Send(request.ConvertTo<SGSyncGetExternal>());
         }
 
         public object Any(SGSendSyncPostInternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncPostInternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncPostInternal);
             return Gateway.Send(request.ConvertTo<SGSyncPostInternal>());
         }
 
         public object Any(SGSendSyncPostExternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncPostExternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncPostExternal);
             return Gateway.Send(request.ConvertTo<SGSyncPostExternal>());
         }
 
@@ -110,7 +116,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         {
             var requests = 3.Times(i => new SGSyncGetAnyInternal
             {
-                Value = request.Value + "> " + Request.Verb + " " + typeof(SGSendAllSyncGetAnyInternal).Name + i
+                Value = request.Value + "> " + Request.Verb + " " + nameof(SGSendAllSyncGetAnyInternal) + i
             });
 
             return Gateway.SendAll(requests);
@@ -120,7 +126,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         {
             var requests = 3.Times(i => new SGSyncPostExternal
             {
-                Value = request.Value + "> " + Request.Verb + " " + typeof(SGSendAllSyncPostExternal).Name + i
+                Value = request.Value + "> " + Request.Verb + " " + nameof(SGSendAllSyncPostExternal) + i
             });
 
             return Gateway.SendAll(requests);
@@ -128,13 +134,13 @@ namespace ServiceStack.WebHost.Endpoints.Tests
 
         public void Any(SGPublishPostInternalVoid request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGPublishPostInternalVoid).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGPublishPostInternalVoid);
             Gateway.Publish(request.ConvertTo<SGSyncPostInternalVoid>());
         }
 
         public void Any(SGPublishPostExternalVoid request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGPublishPostExternalVoid).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGPublishPostExternalVoid);
             Gateway.Publish(request.ConvertTo<SGSyncPostExternalVoid>());
         }
 
@@ -142,7 +148,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         {
             var requests = 3.Times(i => new SGSyncPostInternalVoid
             {
-                Value = request.Value + "> " + Request.Verb + " " + typeof(SGPublishAllPostInternalVoid).Name + i
+                Value = request.Value + "> " + Request.Verb + " " + nameof(SGPublishAllPostInternalVoid) + i
             });
 
             Gateway.PublishAll(requests);
@@ -152,7 +158,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         {
             var requests = 3.Times(i => new SGSyncPostExternalVoid
             {
-                Value = request.Value + "> " + Request.Verb + " " + typeof(SGPublishAllPostExternalVoid).Name + i
+                Value = request.Value + "> " + Request.Verb + " " + nameof(SGPublishAllPostExternalVoid) + i
             });
 
             Gateway.PublishAll(requests);
@@ -160,20 +166,49 @@ namespace ServiceStack.WebHost.Endpoints.Tests
 
         public object Any(SGSendSyncGetSyncObjectInternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncGetSyncObjectInternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncGetSyncObjectInternal);
             return Gateway.Send<object>(request.ConvertTo<SGSyncGetSyncObjectInternal>());
         }
 
         public object Any(SGSendSyncGetAsyncObjectExternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSendSyncGetAsyncObjectExternal).Name;
+            request.Value += "> " + Request.Verb + " " + nameof(SGSendSyncGetAsyncObjectExternal);
             return Gateway.SendAsync<object>(request.ConvertTo<SGSyncGetAsyncObjectExternal>());
         }
         
         public object Any(SGSyncPostValidationExternal request)
         {
-            request.Value += "> " + Request.Verb + " " + typeof(SGSyncPostValidationExternal).Name;
-            return Gateway.Send(request.ConvertTo<SGSyncPostValidationInternal>());
+            request.Value += "> " + Request.Verb + " " + nameof(SGSyncPostValidationExternal);
+            try
+            {
+                return Gateway.Send(request.ConvertTo<SGSyncPostValidationInternal>());
+            }
+            catch (WebServiceException e)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                throw new NotImplementedException("Should throw WebServiceException", e);
+            }
+        }
+        
+        public async Task<object> Any(SGSyncPostValidationAsyncExternal request)
+        {
+            await Task.Yield();
+            request.Value += "> " + Request.Verb + " " + nameof(SGSyncPostValidationAsyncExternal);
+            try
+            {
+                return await Gateway.SendAsync(request.ConvertTo<SGSyncPostValidationAsyncInternal>());
+            }
+            catch (WebServiceException e)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                throw new NotImplementedException("Should throw WebServiceException", e);
+            }
         }
 
     }
@@ -244,43 +279,64 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         }
     }
 
+    public class SGSyncPostValidationAsyncInternal : IReturn<SGSyncPostValidationAsyncInternal>
+    {
+        public string Value { get; set; }
+        public string Required { get; set; }
+    }
+
+    public class SGSyncPostValidationAsyncInternalValidator : AbstractValidator<SGSyncPostValidationAsyncInternal>
+    {
+        public SGSyncPostValidationAsyncInternalValidator()
+        {
+            RuleFor(x => x.Required).NotEmpty();
+        }
+    }
+
     public class ServiceGatewayInternalServices : Service
     {
         public object Get(SGSyncGetInternal request)
         {
             if (request.Throw)
-                throw new ArgumentException("ERROR " + typeof(SGSendSyncGetInternal).Name);
+                throw new ArgumentException("ERROR " + nameof(SGSendSyncGetInternal));
 
-            request.Value += "> GET " + typeof(SGSyncGetInternal).Name;
+            request.Value += "> GET " + nameof(SGSyncGetInternal);
             return request;
         }
 
         public object Post(SGSyncPostInternal request)
         {
-            request.Value += "> POST " + typeof(SGSyncPostInternal).Name;
+            request.Value += "> POST " + nameof(SGSyncPostInternal);
             return request;
         }
 
         public object Any(SGSyncGetAnyInternal request)
         {
-            request.Value += "> ANY " + typeof(SGSyncGetAnyInternal).Name;
+            request.Value += "> ANY " + nameof(SGSyncGetAnyInternal);
             return request;
         }
 
         public void Post(SGSyncPostInternalVoid request)
         {
-            request.Value += "> POST " + typeof(SGSyncPostInternalVoid).Name;
+            request.Value += "> POST " + nameof(SGSyncPostInternalVoid);
         }
 
         public object Any(SGSyncGetSyncObjectInternal request)
         {
-            request.Value += "> GET " + typeof(SGSyncGetSyncObjectInternal).Name;
+            request.Value += "> GET " + nameof(SGSyncGetSyncObjectInternal);
             return request;
         }
 
         public object Any(SGSyncPostValidationInternal request)
         {
-            request.Value += "> ANY " + typeof(SGSyncPostValidationInternal).Name;
+            request.Value += "> ANY " + nameof(SGSyncPostValidationInternal);
+            return request;
+        }
+
+        public async Task<object> Any(SGSyncPostValidationAsyncInternal request)
+        {
+            await Task.Yield();
+            request.Value += "> ANY " + nameof(SGSyncPostValidationAsyncInternal);
             return request;
         }
     }
@@ -290,33 +346,33 @@ namespace ServiceStack.WebHost.Endpoints.Tests
         public object Get(SGSyncGetExternal request)
         {
             if (request.Throw)
-                throw new ArgumentException("ERROR " + typeof(SGSyncGetExternal).Name);
+                throw new ArgumentException("ERROR " + nameof(SGSyncGetExternal));
 
-            request.Value += "> GET " + typeof(SGSyncGetExternal).Name;
+            request.Value += "> GET " + nameof(SGSyncGetExternal);
             return request;
         }
 
         public object Post(SGSyncPostExternal request)
         {
-            request.Value += "> POST " + typeof(SGSyncPostExternal).Name;
+            request.Value += "> POST " + nameof(SGSyncPostExternal);
             return request;
         }
 
         public object Any(SGSyncGetAnyExternal request)
         {
-            request.Value += "> ANY " + typeof(SGSyncGetAnyExternal).Name;
+            request.Value += "> ANY " + nameof(SGSyncGetAnyExternal);
             return request;
         }
 
         public void Post(SGSyncPostExternalVoid request)
         {
-            request.Value += "> POST " + typeof(SGSyncPostExternalVoid).Name;
+            request.Value += "> POST " + nameof(SGSyncPostExternalVoid);
         }
 
         public async Task<object> Any(SGSyncGetAsyncObjectExternal request)
         {
             await Task.Yield();
-            request.Value += "> GET " + typeof(SGSyncGetAsyncObjectExternal).Name;
+            request.Value += "> GET " + nameof(SGSyncGetAsyncObjectExternal);
             return request;
         }
     }
@@ -365,7 +421,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
 
         class MixedAppHost : AppSelfHostBase
         {
-            public MixedAppHost() : base(typeof(ServiceGatewayTests).Name, typeof(ServiceGatewayServices).Assembly) { }
+            public MixedAppHost() : base(nameof(ServiceGatewayTests), typeof(ServiceGatewayServices).Assembly) { }
 
             public override void Configure(Container container)
             {
@@ -389,7 +445,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
     {
         class AllExternalAppHost : AppSelfHostBase
         {
-            public AllExternalAppHost() : base(typeof(ServiceGatewayTests).Name, typeof(ServiceGatewayServices).Assembly) { }
+            public AllExternalAppHost() : base(nameof(ServiceGatewayTests), typeof(ServiceGatewayServices).Assembly) { }
 
             public override void Configure(Container container)
             {
@@ -412,7 +468,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
     {
         class AllInternalAppHost : AppSelfHostBase
         {
-            public AllInternalAppHost() : base(typeof(ServiceGatewayTests).Name, typeof(ServiceGatewayServices).Assembly) { }
+            public AllInternalAppHost() : base(nameof(ServiceGatewayTests), typeof(ServiceGatewayServices).Assembly) { }
 
             public override void Configure(Container container)
             {
@@ -492,10 +548,10 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             catch (WebServiceException ex)
             {
                 Assert.That(ex.StatusCode, Is.EqualTo(400));
-                Assert.That(ex.StatusDescription, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ErrorCode, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ResponseStatus.Message, Is.EqualTo("ERROR " + typeof(SGSendSyncGetInternal).Name));
+                Assert.That(ex.StatusDescription, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Message, Is.EqualTo("ERROR " + nameof(SGSendSyncGetInternal)));
             }
         }
 
@@ -516,10 +572,10 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             catch (WebServiceException ex)
             {
                 Assert.That(ex.StatusCode, Is.EqualTo(400));
-                Assert.That(ex.StatusDescription, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ErrorCode, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(typeof(ArgumentException).Name));
-                Assert.That(ex.ResponseStatus.Message, Is.EqualTo("ERROR " + typeof(SGSyncGetExternal).Name));
+                Assert.That(ex.StatusDescription, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo(nameof(ArgumentException)));
+                Assert.That(ex.ResponseStatus.Message, Is.EqualTo("ERROR " + nameof(SGSyncGetExternal)));
             }
         }
 
@@ -529,6 +585,24 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             try
             {
                 var response = client.Get(new SGSyncPostValidationExternal { Value = "GET CLIENT" });
+                Assert.Fail("Should throw");
+            }
+            catch (WebServiceException ex)
+            {
+                Assert.That(ex.StatusCode, Is.EqualTo(400));
+                Assert.That(ex.StatusDescription, Is.EqualTo("NotEmpty"));
+                Assert.That(ex.ErrorCode, Is.EqualTo("NotEmpty"));
+                Assert.That(ex.ResponseStatus.ErrorCode, Is.EqualTo("NotEmpty"));
+                Assert.That(ex.ResponseStatus.Message, Is.EqualTo("'Required' must not be empty."));
+            }
+        }
+
+        [Test]
+        public void Does_throw_original_ValidationException_in_SGSyncPostValidationAsyncExternal()
+        {
+            try
+            {
+                var response = client.Get(new SGSyncPostValidationAsyncExternal { Value = "GET CLIENT" });
                 Assert.Fail("Should throw");
             }
             catch (WebServiceException ex)

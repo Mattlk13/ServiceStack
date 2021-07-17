@@ -41,7 +41,7 @@ namespace ServiceStack.Script
                 return TypeConstants.EmptyTask;
             }
 
-            var ret = await token.EvaluateAsync(scope);
+            var ret = await token.EvaluateAsync(scope).ConfigAwait();
             return ret == JsNull.Value 
                 ? null 
                 : ret;
@@ -154,6 +154,13 @@ namespace ServiceStack.Script
                 {
                     literal = peekLiteral.ParseVariableDeclaration(kind.Value, out var varDec);
                     token = varDec;
+                    return literal;
+                }
+
+                if (peekChar == '=' && peekLiteral.SafeGetChar(1) != '=') // not ==, ===
+                {
+                    literal = peekLiteral.ParseAssignmentExpression(identifier, out var assignExpr);
+                    token = assignExpr;
                     return literal;
                 }
             }

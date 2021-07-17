@@ -179,7 +179,7 @@ namespace ServiceStack.Common.Tests
         }
 
         [Test]
-        public void GetList_returns_emtpy_list_On_Null_Key()
+        public void GetList_returns_empty_list_On_Null_Key()
         {
             var appSettings = GetAppSettings();
 
@@ -201,6 +201,30 @@ namespace ServiceStack.Common.Tests
 
             result = appSettings.GetOrCreate(key, () => key + ++i);
             Assert.That(result, Is.EqualTo("key1"));
+        }
+        
+        public class AppConfig
+        {
+            public int IntValue { get; set; }
+            public bool BoolValue { get; set; }
+        }
+
+        [Test]
+        public void Does_Save_Typed_Poco_Config()
+        {
+            var appSettings = (OrmLiteAppSettings)GetAppSettings();
+            appSettings.Set("config", new AppConfig {
+                IntValue = 1,
+                BoolValue = true
+            });
+
+            var config = appSettings.Get<AppConfig>("config");
+            Assert.That(config.IntValue, Is.EqualTo(1));
+            Assert.That(config.BoolValue);
+            
+            appSettings.Delete("config");
+            config = appSettings.Get<AppConfig>("config");
+            Assert.That(config, Is.Null);
         }
     }
 
@@ -235,7 +259,7 @@ ObjectKey {SomeSetting:Test,SomeOtherSetting:12,FinalSetting:Final}";
             var settings = textFile.ParseKeyValueText();
             var appSettings = new DictionarySettings(settings);
 
-            Assert.That(appSettings.Get("EmptyKey"), Is.EqualTo(""));
+            Assert.That(appSettings.Get("EmptyKey"), Is.EqualTo("").Or.Null);
             Assert.That(appSettings.Get("RealKey"), Is.EqualTo("This is a real value"));
 
             Assert.That(appSettings.Get("IntKey", defaultValue: 1), Is.EqualTo(42));

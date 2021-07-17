@@ -144,7 +144,7 @@ namespace ServiceStack.Host.Handlers
 
                         if (file == null)
                         {
-                            var msg = ErrorMessages.FileNotExistsFmt.Fmt(request.PathInfo.SafeInput());
+                            var msg = ErrorMessages.FileNotExistsFmt.LocalizeFmt(request, request.PathInfo.SafeInput());
                             log.Warn($"{msg} in path: {originalFileName}");
                             response.StatusCode = 404;
                             response.StatusDescription = msg;
@@ -192,33 +192,32 @@ namespace ServiceStack.Host.Handlers
 
                         if (!shouldCompress)
                         {
-                            await r.OutputStream.WriteAsync(DefaultFileContents);
-                            await r.OutputStream.FlushAsync();
+                            await r.OutputStream.WriteAsync(DefaultFileContents).ConfigAwait();
+                            await r.OutputStream.FlushAsync().ConfigAwait();
                         }
                         else
                         {
                             byte[] zipBytes = null;
                             if (encoding == CompressionTypes.GZip)
                             {
-                                zipBytes = DefaultFileContentsGzip ??
-                                           (DefaultFileContentsGzip = DefaultFileContents.CompressBytes(encoding));
+                                zipBytes = DefaultFileContentsGzip ??= DefaultFileContents.CompressBytes(encoding);
                             }
                             else if (encoding == CompressionTypes.Deflate)
                             {
-                                zipBytes = DefaultFileContentsDeflate ??
-                                           (DefaultFileContentsDeflate = DefaultFileContents.CompressBytes(encoding));
+                                zipBytes = DefaultFileContentsDeflate ??= DefaultFileContents.CompressBytes(encoding);
                             }
                             else
                             {
                                 zipBytes = DefaultFileContents.CompressBytes(encoding);
                             }
+
                             r.AddHeader(HttpHeaders.ContentEncoding, encoding);
                             r.SetContentLength(zipBytes.Length);
-                            await r.OutputStream.WriteAsync(zipBytes);
-                            await r.OutputStream.FlushAsync();
+                            await r.OutputStream.WriteAsync(zipBytes).ConfigAwait();
+                            await r.OutputStream.FlushAsync().ConfigAwait();
                         }
 
-                        r.Close();
+                        await r.CloseAsync().ConfigAwait();
                         return;
                     }
 
@@ -234,36 +233,36 @@ namespace ServiceStack.Host.Handlers
                         if (rangeEnd > contentLength - 1)
                             rangeEnd = contentLength - 1;
 
-                        r.AddHttpRangeResponseHeaders(rangeStart: rangeStart, rangeEnd: rangeEnd, contentLength: contentLength);
+                        r.AddHttpRangeResponseHeaders(rangeStart: rangeStart, rangeEnd: rangeEnd,
+                            contentLength: contentLength);
                     }
                     else
                     {
                         rangeStart = 0;
                         rangeEnd = contentLength - 1;
                     }
+
                     var outputStream = r.OutputStream;
-                    using (var fs = file.OpenRead())
+                    using var fs = file.OpenRead();
+                    if (rangeStart != 0 || rangeEnd != file.Length - 1)
                     {
-                        if (rangeStart != 0 || rangeEnd != file.Length - 1)
+                        await fs.WritePartialToAsync(outputStream, rangeStart, rangeEnd).ConfigAwait();
+                    }
+                    else
+                    {
+                        if (!shouldCompress)
                         {
-                            await fs.WritePartialToAsync(outputStream, rangeStart, rangeEnd);
+                            r.SetContentLength(contentLength);
+                            await fs.CopyToAsync(outputStream, BufferSize).ConfigAwait();
+                            await outputStream.FlushAsync().ConfigAwait();
                         }
                         else
                         {
-                            if (!shouldCompress)
-                            {
-                                r.SetContentLength(contentLength);
-                                await fs.CopyToAsync(outputStream, BufferSize);
-                                await outputStream.FlushAsync();
-                            }
-                            else
-                            {
-                                r.AddHeader(HttpHeaders.ContentEncoding, encoding);
-                                outputStream = outputStream.CompressStream(encoding);
-                                await fs.CopyToAsync(outputStream);
-                                await outputStream.FlushAsync();
-                                outputStream.Close();
-                            }
+                            r.AddHeader(HttpHeaders.ContentEncoding, encoding);
+                            outputStream = outputStream.CompressStream(encoding);
+                            await fs.CopyToAsync(outputStream).ConfigAwait();
+                            await outputStream.FlushAsync().ConfigAwait();
+                            outputStream.Close();
                         }
                     }
                 }
@@ -281,10 +280,17 @@ namespace ServiceStack.Host.Handlers
 #endif
                 catch (Exception ex)
                 {
+                    if (ex is IHttpError httpError)
+                    {
+                        r.StatusCode = (int) httpError.StatusCode;
+                        r.StatusDescription = httpError.Message ?? httpError.ErrorCode;
+                        return;
+                    }
+                    
                     log.ErrorFormat($"Static file {request.PathInfo} forbidden: {ex.Message}");
                     throw new HttpException(403, "Forbidden.");
                 }
-            });
+            }).ConfigAwait();
         }
 
         static Dictionary<string, string> CreateFileIndex(string appFilePath)

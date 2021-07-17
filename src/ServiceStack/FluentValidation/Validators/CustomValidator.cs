@@ -1,4 +1,4 @@
-﻿namespace ServiceStack.FluentValidation.Validators {
+namespace ServiceStack.FluentValidation.Validators {
 	using System;
 	using System.Collections.Generic;
 	using System.Threading;
@@ -18,7 +18,7 @@
 		/// Creates a new instance of the CustomValidator
 		/// </summary>
 		/// <param name="action"></param>
-		public CustomValidator(Action<T, CustomContext> action) : base(string.Empty) {
+		public CustomValidator(Action<T, CustomContext> action) {
 			_isAsync = false;
 			_action = action;
 
@@ -29,7 +29,7 @@
 		/// Creates a new instance of the CustomValidator.
 		/// </summary>
 		/// <param name="asyncAction"></param>
-		public CustomValidator(Func<T, CustomContext, CancellationToken, Task> asyncAction) : base(string.Empty) {
+		public CustomValidator(Func<T, CustomContext, CancellationToken, Task> asyncAction) {
 			_isAsync = true;
 			_asyncAction = asyncAction;
 			//TODO: For FV 9, throw an exception by default if async validator is being executed synchronously.
@@ -52,7 +52,7 @@
 			throw new NotImplementedException();
 		}
 
-		public override bool ShouldValidateAsync(ValidationContext context) {
+		public override bool ShouldValidateAsynchronously(IValidationContext context) {
 			return _isAsync && context.IsAsync();
 		}
 	}
@@ -60,7 +60,7 @@
 	/// <summary>
 	/// Custom validation context
 	/// </summary>
-	public class CustomContext : IValidationContext {
+	public class CustomContext : ICommonContext {
 		private PropertyValidatorContext _context;
 		private List<ValidationFailure> _failures = new List<ValidationFailure>();
 
@@ -106,9 +106,9 @@
 		public string PropertyName => _context.PropertyName;
 		public string DisplayName => _context.DisplayName;
 		public MessageFormatter MessageFormatter => _context.MessageFormatter;
-		public object InstanceToValidate => _context.Instance;
+		public object InstanceToValidate => _context.InstanceToValidate;
 		public object PropertyValue => _context.PropertyValue;
-		IValidationContext IValidationContext.ParentContext => ParentContext;
-		public ValidationContext ParentContext => _context.ParentContext;
+		ICommonContext ICommonContext.ParentContext => ParentContext;
+		public IValidationContext ParentContext => _context.ParentContext;
 	}
 }

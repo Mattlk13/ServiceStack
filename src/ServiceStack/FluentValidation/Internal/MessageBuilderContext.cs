@@ -1,44 +1,55 @@
-﻿namespace ServiceStack.FluentValidation.Internal {
-    using Resources;
-    using Validators;
+namespace ServiceStack.FluentValidation.Internal {
+	using System;
+	using Resources;
+	using Validators;
 
-    public class MessageBuilderContext : IValidationContext {
-        private PropertyValidatorContext _innerContext;
+	public class MessageBuilderContext : ICommonContext {
+		private PropertyValidatorContext _innerContext;
 
-        public MessageBuilderContext(PropertyValidatorContext innerContext, IStringSource errorSource, IPropertyValidator propertyValidator) {
-            _innerContext = innerContext;
-            ErrorSource = errorSource;
-            PropertyValidator = propertyValidator;
-        }
+		[Obsolete("This constructor will be removed in FluentValidation 10. Use the other one instead.")]
+		public MessageBuilderContext(PropertyValidatorContext innerContext, IStringSource errorSource, IPropertyValidator propertyValidator) {
+			_innerContext = innerContext;
+			ErrorSource = errorSource;
+			PropertyValidator = propertyValidator;
+		}
 
-        public IPropertyValidator PropertyValidator { get; }
+		public MessageBuilderContext(PropertyValidatorContext innerContext, IPropertyValidator propertyValidator) {
+			_innerContext = innerContext;
+			PropertyValidator = propertyValidator;
+			// TODO: For backwards compatibility (remove in FV10).
+#pragma warning disable 618
+			ErrorSource = PropertyValidator.Options.ErrorMessageSource;
+#pragma warning restore 618
+		}
 
-        public IStringSource ErrorSource { get; }
 
-        public ValidationContext ParentContext => _innerContext.ParentContext;
+		public IPropertyValidator PropertyValidator { get; }
 
-        public PropertyRule Rule => _innerContext.Rule;
+		[Obsolete("This property is deprecated and will be removed in FluentValidation 10.")]
+		public IStringSource ErrorSource { get; }
 
-        public string PropertyName => _innerContext.PropertyName;
+		public IValidationContext ParentContext => _innerContext.ParentContext;
 
-        public string DisplayName => _innerContext.DisplayName;
+		public PropertyRule Rule => _innerContext.Rule;
 
-        public object Instance => _innerContext.Instance;
+		public string PropertyName => _innerContext.PropertyName;
 
-        public MessageFormatter MessageFormatter => _innerContext.MessageFormatter;
+		public string DisplayName => _innerContext.DisplayName;
 
-        public object InstanceToValidate => _innerContext.Instance;
-        public object PropertyValue => _innerContext.PropertyValue;
-		
-        IValidationContext IValidationContext.ParentContext => ParentContext;
+		public MessageFormatter MessageFormatter => _innerContext.MessageFormatter;
 
-        public string GetDefaultMessage() {
-            return MessageFormatter.BuildMessage(ErrorSource.GetString(_innerContext));
-        }
+		public object InstanceToValidate => _innerContext.InstanceToValidate;
+		public object PropertyValue => _innerContext.PropertyValue;
 
-        public static implicit operator PropertyValidatorContext(MessageBuilderContext ctx) {
-            return ctx._innerContext;
-        }
+		ICommonContext ICommonContext.ParentContext => ParentContext;
 
-    }
+		public string GetDefaultMessage() {
+			return PropertyValidator.Options.GetErrorMessageTemplate(_innerContext);
+		}
+
+		public static implicit operator PropertyValidatorContext(MessageBuilderContext ctx) {
+			return ctx._innerContext;
+		}
+
+	}
 }

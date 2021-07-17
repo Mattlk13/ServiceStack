@@ -3,7 +3,9 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
+using ServiceStack.Logging;
 using ServiceStack.Web;
+using ServiceStack.Text;
 
 namespace ServiceStack
 {
@@ -53,9 +55,9 @@ namespace ServiceStack
             httpRes.EndHttpHandlerRequest(skipHeaders: skipHeaders);
         }
 
-        public static Task EndRequestAsync(this IResponse httpRes, bool skipHeaders = false)
+        public static Task EndRequestAsync(this IResponse httpRes, bool skipHeaders = false, Func<IResponse,Task> afterHeaders = null)
         {
-            return httpRes.EndHttpHandlerRequestAsync(skipHeaders: skipHeaders);
+            return httpRes.EndHttpHandlerRequestAsync(skipHeaders: skipHeaders, afterHeaders:afterHeaders);
         }
         
 #if !NETSTANDARD2_0
@@ -114,7 +116,15 @@ namespace ServiceStack
 
             if (afterHeaders != null)
             {
-                await afterHeaders(httpRes);
+                try
+                {
+                    await afterHeaders(httpRes).ConfigAwait();
+                }
+                catch (Exception e)
+                {
+                    var log = LogManager.LogFactory.GetLogger(typeof(HttpExtensions));
+                    log.Error("Error executing async afterHeaders: " + e.Message, e);
+                }
             }
 
             var req = httpRes.Request;
@@ -124,7 +134,7 @@ namespace ServiceStack
             }
 
             if (!skipClose && !httpRes.IsClosed) 
-                await httpRes.CloseAsync();
+                await httpRes.CloseAsync().ConfigAwait();
 
             HostContext.CompleteRequest(req);
         }

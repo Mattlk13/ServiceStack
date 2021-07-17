@@ -5,9 +5,7 @@ using System.Net;
 using System.Threading.Tasks;
 using Funq;
 using NUnit.Framework;
-using ServiceStack.Caching;
 using ServiceStack.Data;
-using ServiceStack.FluentValidation;
 using ServiceStack.Model;
 using ServiceStack.OrmLite;
 using ServiceStack.Script;
@@ -16,6 +14,26 @@ using ServiceStack.Web;
 
 namespace ServiceStack.WebHost.Endpoints.Tests
 {
+    public class NoRockstarAlbumReferences : TypeValidator
+    {
+        public NoRockstarAlbumReferences() 
+            : base("HasForeignKeyReferences", "Has RockstarAlbum References") {}
+
+        public override async Task<bool> IsValidAsync(object dto, IRequest request)
+        {
+            //Example of using compiled accessor delegates to access `Id` property
+            //var id = TypeProperties.Get(dto.GetType()).GetPublicGetter("Id")(dto).ConvertTo<int>();
+
+            var id = ((IHasId<int>) dto).Id;
+            using var db = HostContext.AppHost.GetDbConnection(request);
+            return !await db.ExistsAsync<RockstarAlbum>(x => x.RockstarId == id);
+        }
+    }
+
+    public class MyValidators : ScriptMethods
+    {
+        public ITypeValidator NoRockstarAlbumReferences() => new NoRockstarAlbumReferences();
+    }
 
     public partial class AutoQueryCrudTests
     {
@@ -50,10 +68,10 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             
             var validationSource = container.Resolve<IValidationSource>();
             validationSource.InitSchema();
-            validationSource.SaveValidationRules(new List<ValidateRule> {
-                new ValidateRule { Type = nameof(DynamicValidationRules), Validator = "IsAuthenticated" },
-                new ValidateRule { Type = nameof(DynamicValidationRules), Field = nameof(DynamicValidationRules.LastName), Validator = "NotNull" },
-                new ValidateRule { Type = nameof(DynamicValidationRules), Field = nameof(DynamicValidationRules.Age), Validator = "InclusiveBetween(13,100)" },
+            validationSource.SaveValidationRulesAsync(new List<ValidationRule> {
+                new ValidationRule { Type = nameof(DynamicValidationRules), Validator = "IsAuthenticated" },
+                new ValidationRule { Type = nameof(DynamicValidationRules), Field = nameof(DynamicValidationRules.LastName), Validator = "NotNull" },
+                new ValidationRule { Type = nameof(DynamicValidationRules), Field = nameof(DynamicValidationRules.Age), Validator = "InclusiveBetween(13,100)" },
             });
         }
 
@@ -243,7 +261,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             }
             catch (WebServiceException ex)
             {
-                ValidationExceptionTests.AssertTriggerValidators(ex);
+                ex.AssertTriggerValidators();
                 Console.WriteLine(ex);
             }
         }
@@ -637,26 +655,6 @@ namespace ServiceStack.WebHost.Endpoints.Tests
             }
         }
 
-        class NoRockstarAlbumReferences : TypeValidator
-        {
-            public NoRockstarAlbumReferences() 
-                : base("HasForeignKeyReferences", "Has RockstarAlbum References") {}
-
-            public override async Task<bool> IsValidAsync(object dto, IRequest request = null)
-            {
-                //Example of dynamic access using compiled accessor delegates
-                //var id = TypeProperties.Get(dto.GetType()).GetPublicGetter("Id")(dto).ConvertTo<int>();
-                var id = ((IHasId<int>) dto).Id;
-                using var db = HostContext.AppHost.GetDbConnection(request);
-                return !(await db.ExistsAsync<RockstarAlbum>(x => x.RockstarId == id));
-            }
-        }
-
-        public class MyValidators : ScriptMethods
-        {
-            public ITypeValidator NoRockstarAlbumReferences() => new NoRockstarAlbumReferences();
-        }
-
         [Test]
         public void Does_validate_TestDbValidator()
         {
@@ -689,6 +687,30 @@ namespace ServiceStack.WebHost.Endpoints.Tests
                 Assert.That(e.ErrorCode, Is.EqualTo("NotNull")); //success!
             }
         }
-        
+    }
+
+    public static class ValidationUtils
+    {
+        public static void AssertTriggerValidators(this WebServiceException ex)
+        {
+            var errors = ex.ResponseStatus.Errors;
+            Assert.That(errors.First(x => x.FieldName == "CreditCard").ErrorCode, Is.EqualTo("CreditCard"));
+            Assert.That(errors.First(x => x.FieldName == "Email").ErrorCode, Is.EqualTo("Email"));
+            Assert.That(errors.First(x => x.FieldName == "Email").ErrorCode, Is.EqualTo("Email"));
+            Assert.That(errors.First(x => x.FieldName == "Empty").ErrorCode, Is.EqualTo("Empty"));
+            Assert.That(errors.First(x => x.FieldName == "Equal").ErrorCode, Is.EqualTo("Equal"));
+            Assert.That(errors.First(x => x.FieldName == "ExclusiveBetween").ErrorCode, Is.EqualTo("ExclusiveBetween"));
+            Assert.That(errors.First(x => x.FieldName == "GreaterThan").ErrorCode, Is.EqualTo("GreaterThan"));
+            Assert.That(errors.First(x => x.FieldName == "GreaterThanOrEqual").ErrorCode, Is.EqualTo("GreaterThanOrEqual"));
+            Assert.That(errors.First(x => x.FieldName == "InclusiveBetween").ErrorCode, Is.EqualTo("InclusiveBetween"));
+            Assert.That(errors.First(x => x.FieldName == "Length").ErrorCode, Is.EqualTo("Length"));
+            Assert.That(errors.First(x => x.FieldName == "LessThan").ErrorCode, Is.EqualTo("LessThan"));
+            Assert.That(errors.First(x => x.FieldName == "LessThanOrEqual").ErrorCode, Is.EqualTo("LessThanOrEqual"));
+            Assert.That(errors.First(x => x.FieldName == "NotEmpty").ErrorCode, Is.EqualTo("NotEmpty"));
+            Assert.That(errors.First(x => x.FieldName == "NotEqual").ErrorCode, Is.EqualTo("NotEqual"));
+            Assert.That(errors.First(x => x.FieldName == "Null").ErrorCode, Is.EqualTo("Null"));
+            Assert.That(errors.First(x => x.FieldName == "RegularExpression").ErrorCode, Is.EqualTo("RegularExpression"));
+            Assert.That(errors.First(x => x.FieldName == "ScalePrecision").ErrorCode, Is.EqualTo("ScalePrecision"));
+        }
     }
 }

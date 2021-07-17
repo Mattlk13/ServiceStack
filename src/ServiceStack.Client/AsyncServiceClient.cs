@@ -2,6 +2,7 @@
 // License: https://raw.github.com/ServiceStack/ServiceStack/master/license.txt
 
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.IO;
 using System.Net;
@@ -133,6 +134,11 @@ namespace ServiceStack
 
         public static bool DisableTimer { get; set; }
 
+        public Dictionary<string, string> GetCookieValues()
+        {
+            return CookieContainer.ToDictionary(BaseUri);
+        }
+
         public Task<TResponse> SendAsync<TResponse>(string httpMethod, string absoluteUrl, object request, CancellationToken token = default(CancellationToken))
         {
             if (ResultsFilter != null)
@@ -236,14 +242,12 @@ namespace ServiceStack
                    if (RequestCompressionType != null)
                         webReq.Headers[HttpHeaders.ContentEncoding] = RequestCompressionType;
 
-                    using (var requestStream = await webReq.GetRequestStreamAsync().ConfigureAwait(false))
-                    {
-                        token.ThrowIfCancellationRequested();
-                        if (request != null)
-                        {
-                            StreamSerializer(null, request, requestStream);
-                        }
-                    }
+                   using var requestStream = await webReq.GetRequestStreamAsync().ConfigAwait();
+                   token.ThrowIfCancellationRequested();
+                   if (request != null)
+                   {
+                       StreamSerializer(null, request, requestStream);
+                   }
                 }
             }
             catch (Exception ex)
@@ -256,7 +260,7 @@ namespace ServiceStack
 
             try
             {
-                webRes = (HttpWebResponse) await webReq.GetResponseAsync().ConfigureAwait(false);
+                webRes = (HttpWebResponse) await webReq.GetResponseAsync().ConfigAwait();
                 {
                     token.ThrowIfCancellationRequested();
 
@@ -275,9 +279,9 @@ namespace ServiceStack
                     int read;
                     var ms = MemoryStreamFactory.GetStream();
 
-                    while ((read = await responseStream.ReadAsync(bufferRead, 0, bufferRead.Length, token).ConfigureAwait(false)) != 0)
+                    while ((read = await responseStream.ReadAsync(bufferRead, 0, bufferRead.Length, token).ConfigAwait()) != 0)
                     {
-                        ms.Write(bufferRead, 0, read);
+                        await ms.WriteAsync(bufferRead, 0, read, token).ConfigAwait();
                         totalRead += read;
                         OnDownloadProgress?.Invoke(totalRead, responseBodyLength);
                     }
@@ -296,7 +300,7 @@ namespace ServiceStack
                             {
                                 if (typeof(T) == typeof(string))
                                 {
-                                    return Complete((T) (object) stream.ReadToEnd());
+                                    return Complete((T) (object) await stream.ReadToEndAsync().ConfigAwait());
                                 }
                                 else if (typeof(T) == typeof(byte[]))
                                     return Complete((T) (object) stream.ToArray());
@@ -327,16 +331,19 @@ namespace ServiceStack
             {
                 var webEx = ex as WebException;
                 var firstCall = !recall;
+                var hasRefreshTokenCookie = this.CookieContainer.GetRefreshTokenCookie(BaseUri) != null;
+                var hasRefreshToken = RefreshToken != null || hasRefreshTokenCookie;
+                
                 if (firstCall && WebRequestUtils.ShouldAuthenticate(webEx,
                         (!string.IsNullOrEmpty(UserName) && !string.IsNullOrEmpty(Password))
                         || Credentials != null
                         || BearerToken != null
-                        || RefreshToken != null
+                        || hasRefreshToken
                         || OnAuthenticationRequired != null))
                 {
                     try
                     {
-                        if (RefreshToken != null)
+                        if (hasRefreshToken)
                         {
                             var refreshRequest = new GetAccessToken {
                                 RefreshToken = RefreshToken,
@@ -347,11 +354,11 @@ namespace ServiceStack
                             GetAccessTokenResponse tokenResponse;
                             try
                             {
-                                tokenResponse = uri.PostJsonToUrl(refreshRequest, requestFilter: req => {
-                                    if (UseTokenCookie) {
+                                tokenResponse = (await uri.PostJsonToUrlAsync(refreshRequest, requestFilter: req => {
+                                    if (UseTokenCookie || hasRefreshTokenCookie) {
                                         req.CookieContainer = CookieContainer;
                                     }
-                                }).FromJson<GetAccessTokenResponse>();
+                                }, token: token).ConfigAwait()).FromJson<GetAccessTokenResponse>();
                             }
                             catch (WebException refreshEx)
                             {
@@ -392,7 +399,7 @@ namespace ServiceStack
                                 }
                             }
 
-                            return await SendWebRequestAsync<T>(httpMethod, absoluteUrl, request, token, recall: true).ConfigureAwait(false);
+                            return await SendWebRequestAsync<T>(httpMethod, absoluteUrl, request, token, recall: true).ConfigAwait();
                         }
 
                         OnAuthenticationRequired?.Invoke();
@@ -404,7 +411,7 @@ namespace ServiceStack
 
                         HandleAuthException(ex, webReq);
 
-                        return await SendWebRequestAsync<T>(httpMethod, absoluteUrl, request, token, recall: true).ConfigureAwait(false);
+                        return await SendWebRequestAsync<T>(httpMethod, absoluteUrl, request, token, recall: true).ConfigAwait();
                     }
                     catch (WebServiceException)
                     {
@@ -454,26 +461,22 @@ namespace ServiceStack
 
                 try
                 {
-                    using (var stream = errorResponse.ResponseStream())
-                    {
-                        var bytes = stream.ReadFully();
-                        serviceEx.ResponseBody = bytes.FromUtf8Bytes();
-                        var errorResponseType = WebRequestUtils.GetErrorResponseDtoType<TResponse>(request);
+                    using var stream = errorResponse.ResponseStream();
+                    var bytes = stream.ReadFully();
+                    serviceEx.ResponseBody = bytes.FromUtf8Bytes();
+                    var errorResponseType = WebRequestUtils.GetErrorResponseDtoType<TResponse>(request);
 
-                        if (stream.CanSeek)
-                        {
-                            PclExport.Instance.ResetStream(stream);
-                            serviceEx.ResponseDto = this.StreamDeserializer(errorResponseType, stream);
-                        }
-                        else //Android
-                        {
-                            using (var ms = MemoryStreamFactory.GetStream(bytes))
-                            {
-                                serviceEx.ResponseDto = this.StreamDeserializer(errorResponseType, ms);
-                            }
-                        }
-                        return serviceEx;
+                    if (stream.CanSeek)
+                    {
+                        PclExport.Instance.ResetStream(stream);
+                        serviceEx.ResponseDto = this.StreamDeserializer(errorResponseType, stream);
                     }
+                    else //Android
+                    {
+                        using var ms = MemoryStreamFactory.GetStream(bytes);
+                        serviceEx.ResponseDto = this.StreamDeserializer(errorResponseType, ms);
+                    }
+                    return serviceEx;
                 }
                 catch (Exception innerEx)
                 {

@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using System.Web;
 using ServiceStack.Logging;
 using ServiceStack.Web;
+using ServiceStack.Text;
 
 namespace ServiceStack.Host.Handlers
 {
@@ -17,7 +18,7 @@ namespace ServiceStack.Host.Handlers
 
         public string RequestName { get; set; }
 
-        private Type[] ProcessRequestArgTypes = new[] {typeof(IRequest), typeof(IResponse), typeof(string)};
+        private Type[] ProcessRequestArgTypes = {typeof(IRequest), typeof(IResponse), typeof(string)};
 
         public virtual bool RunAsAsync()
         {
@@ -147,7 +148,7 @@ namespace ServiceStack.Host.Handlers
             return CreateProcessRequestTask(httpReq, httpReq.Response, operationName);
         }
 #else
-        public virtual Task Middleware(Microsoft.AspNetCore.Http.HttpContext context, Func<Task> next)
+        public virtual async Task Middleware(Microsoft.AspNetCore.Http.HttpContext context, Func<Task> next)
         {
             var operationName = context.Request.GetOperationName().UrlDecode() ?? "Home";
 
@@ -157,9 +158,15 @@ namespace ServiceStack.Host.Handlers
             if (!string.IsNullOrEmpty(RequestName))
                 operationName = RequestName;
 
-            var task = ProcessRequestAsync(httpReq, httpRes, operationName);
-            HostContext.Async.ContinueWith(httpReq, task, x => httpRes.Close(), TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.AttachedToParent);
-            return task;
+            try
+            {
+                var task = ProcessRequestAsync(httpReq, httpRes, operationName);
+                await task;
+            }
+            finally
+            {
+                await httpRes.CloseAsync();
+            }
         }
 #endif
 
@@ -167,12 +174,9 @@ namespace ServiceStack.Host.Handlers
 
         protected async Task HandleException(IRequest httpReq, IResponse httpRes, string operationName, Exception ex)
         {
-            var errorMessage = $"Error occured while Processing Request: {ex.Message}";
-            HostContext.AppHost.OnLogError(typeof(HttpAsyncTaskHandler), errorMessage, ex);
-
             try
             {
-                await HostContext.RaiseAndHandleException(httpReq, httpRes, operationName, ex);
+                await HostContext.RaiseAndHandleException(httpReq, httpRes, operationName, ex).ConfigAwait();
             }
             catch (Exception writeErrorEx)
             {
@@ -183,7 +187,7 @@ namespace ServiceStack.Host.Handlers
             }
             finally
             {
-                httpRes.EndRequest(skipHeaders: true);
+                await httpRes.EndRequestAsync(skipHeaders: true).ConfigAwait();
             }
         }
 

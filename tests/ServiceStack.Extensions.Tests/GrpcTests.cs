@@ -821,26 +821,13 @@ namespace ServiceStack.Extensions.Tests
         }
 
         static string GetServiceProto<T>()
-            => GrpcConfig.TypeModel.GetSchema(GrpcMarshaller<T>.GetMetaType().Type, ProtoBuf.Meta.ProtoSyntax.Proto3);
+            => GrpcConfig.TypeModel.GetSchema(MetaTypeConfig<T>.GetMetaType().Type, ProtoBuf.Meta.ProtoSyntax.Proto3);
 
         [Test]
         public void CheckServiceProto_BaseType()
         {
             var schema = GetServiceProto<Foo>();
             Assert.AreEqual(@"syntax = ""proto3"";
-package ServiceStack.Extensions.Tests;
-
-message Foo {
-   string X = 1;
-}
-", schema);
-         }
- 
-         [Test]
-         public void CheckServiceProto_DerivedType()
-         {
-             var schema = GetServiceProto<Bar>();
-             Assert.AreEqual(@"syntax = ""proto3"";
 package ServiceStack.Extensions.Tests;
 
 message Bar {
@@ -853,7 +840,26 @@ message Foo {
    }
 }
 ", schema);
-         }
+        }
+ 
+        [Test]
+        public void CheckServiceProto_DerivedType()
+        {
+            var schema = GetServiceProto<Bar>();
+            Assert.AreEqual(@"syntax = ""proto3"";
+package ServiceStack.Extensions.Tests;
+
+message Bar {
+   string Y = 2;
+}
+message Foo {
+   string X = 1;
+   oneof subtype {
+      Bar Bar = 210304982;
+   }
+}
+", schema);
+        }
  
         [Test]
         public void CheckServiceProto_QueryDb_ShouldBeOffset()

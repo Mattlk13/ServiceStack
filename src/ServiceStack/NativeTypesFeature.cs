@@ -6,8 +6,9 @@ using ServiceStack.NativeTypes;
 
 namespace ServiceStack
 {
-    public class NativeTypesFeature : IPlugin
+    public class NativeTypesFeature : IPlugin, Model.IHasStringId
     {
+        public string Id { get; set; } = Plugins.NativeTypes;
         public MetadataTypesConfig MetadataTypesConfig { get; set; }
 
         public static bool DisableTokenVerification { get; set; }
@@ -32,8 +33,34 @@ namespace ServiceStack
                     typeof(StringLengthAttribute),
                     typeof(AutoQueryViewerAttribute),
                     typeof(AutoQueryViewerFieldAttribute),
+                    
                     typeof(ValidateRequestAttribute),
+                    typeof(ValidateIsAuthenticatedAttribute),
+                    typeof(ValidateIsAdminAttribute),
+                    typeof(ValidateHasRoleAttribute),
+                    typeof(ValidateHasPermissionAttribute),
+                    
                     typeof(ValidateAttribute),
+                    typeof(ValidateNullAttribute),
+                    typeof(ValidateEmptyAttribute),
+                    typeof(ValidateEmailAttribute),
+                    typeof(ValidateNotNullAttribute),
+                    typeof(ValidateNotEmptyAttribute),
+                    typeof(ValidateCreditCardAttribute),
+                    typeof(ValidateLengthAttribute),
+                    typeof(ValidateExactLengthAttribute),
+                    typeof(ValidateMaximumLengthAttribute),
+                    typeof(ValidateMinimumLengthAttribute),
+                    typeof(ValidateLessThanAttribute),
+                    typeof(ValidateLessThanOrEqualAttribute),
+                    typeof(ValidateGreaterThanAttribute),
+                    typeof(ValidateGreaterThanOrEqualAttribute),
+                    typeof(ValidateScalePrecisionAttribute),
+                    typeof(ValidateRegularExpressionAttribute),
+                    typeof(ValidateEqualAttribute),
+                    typeof(ValidateNotEqualAttribute),
+                    typeof(ValidateInclusiveBetweenAttribute),
+                    typeof(ValidateExclusiveBetweenAttribute),
                 },
                 ExportTypes = new HashSet<Type>
                 {

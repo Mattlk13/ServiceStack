@@ -220,6 +220,18 @@ namespace ServiceStack.Script
                 Args[ScriptConstants.Request] = hasRequest;
         }
 
+        public PageResult AssignArgs(Dictionary<string, object> args)
+        {
+            if (args != null)
+            {
+                foreach (var entry in args)
+                {
+                    Args[entry.Key] = entry.Value;
+                }
+            }
+            return this;
+        }
+
         //entry point
         public async Task WriteToAsync(Stream responseStream, CancellationToken token = default)
         {
@@ -228,16 +240,14 @@ namespace ServiceStack.Script
                 var bufferOutput = !DisableBuffering && !(responseStream is MemoryStream);
                 if (bufferOutput)
                 {
-                    using (var ms = MemoryStreamFactory.GetStream())
-                    {
-                        await WriteToAsyncInternal(ms, token);
-                        ms.Position = 0;
-                        await ms.WriteToAsync(responseStream, token);
-                    }
+                    using var ms = MemoryStreamFactory.GetStream();
+                    await WriteToAsyncInternal(ms, token).ConfigAwait();
+                    ms.Position = 0;
+                    await ms.WriteToAsync(responseStream, token).ConfigAwait();
                 }
                 else
                 {
-                    await WriteToAsyncInternal(responseStream, token);
+                    await WriteToAsyncInternal(responseStream, token).ConfigAwait();
                 }
                 return;
             }
@@ -247,19 +257,19 @@ namespace ServiceStack.Script
             {
                 stackTrace.Push("OutputTransformer");
                 
-                await WriteToAsyncInternal(ms, token);
+                await WriteToAsyncInternal(ms, token).ConfigAwait();
                 Stream stream = ms;
 
                 foreach (var transformer in OutputTransformers)
                 {
                     stream.Position = 0;
-                    stream = await transformer(stream);
+                    stream = await transformer(stream).ConfigAwait();
                 }
 
                 using (stream)
                 {
                     stream.Position = 0;
-                    await stream.WriteToAsync(responseStream, token);
+                    await stream.WriteToAsync(responseStream, token).ConfigAwait();
                 }
 
                 stackTrace.Pop();
@@ -268,29 +278,29 @@ namespace ServiceStack.Script
 
         internal async Task WriteToAsyncInternal(Stream outputStream, CancellationToken token)
         {
-            await Init();
+            await Init().ConfigAwait();
 
             if (!NoLayout)
             {
                 if (LayoutPage != null)
                 {
-                    await LayoutPage.Init();
+                    await LayoutPage.Init().ConfigAwait();
                 
                     if (CodePage != null)
                         InitIfNewPage(CodePage);
 
                     if (Page != null)
-                        await InitIfNewPage(Page);
+                        await InitIfNewPage(Page).ConfigAwait();
                 }
                 else
                 {
                     if (Page != null)
                     {
-                        await InitIfNewPage(Page);
+                        await InitIfNewPage(Page).ConfigAwait();
                         if (Page.LayoutPage != null)
                         {
                             LayoutPage = Page.LayoutPage;
-                            await LayoutPage.Init();
+                            await LayoutPage.Init().ConfigAwait();
                         }
                     }
                     else if (CodePage != null)
@@ -299,7 +309,7 @@ namespace ServiceStack.Script
                         if (CodePage.LayoutPage != null)
                         {
                             LayoutPage = CodePage.LayoutPage;
-                            await LayoutPage.Init();
+                            await LayoutPage.Init().ConfigAwait();
                         }
                     }
                 }
@@ -308,7 +318,7 @@ namespace ServiceStack.Script
             {
                 if (Page != null)
                 {
-                    await InitIfNewPage(Page);
+                    await InitIfNewPage(Page).ConfigAwait();
                 }
                 else if (CodePage != null)
                 {
@@ -330,14 +340,14 @@ namespace ServiceStack.Script
                     if (HaltExecution)
                         break;
 
-                    await WritePageFragmentAsync(pageScope, fragment, token);
+                    await WritePageFragmentAsync(pageScope, fragment, token).ConfigAwait();
                 }
 
                 stackTrace.Pop();
             }
             else
             {
-                await WritePageAsync(Page, CodePage, pageScope, token);
+                await WritePageAsync(Page, CodePage, pageScope, token).ConfigAwait();
             }
         }
 
@@ -350,7 +360,7 @@ namespace ServiceStack.Script
                 if (HaltExecution)
                     return;
 
-                await WritePageFragmentAsync(scope, fragment, token);
+                await WritePageFragmentAsync(scope, fragment, token).ConfigAwait();
             }
             
             stackTrace.Pop();
@@ -363,7 +373,7 @@ namespace ServiceStack.Script
                 if (ShouldSkipFilterExecution(fragment))
                     return;
                 
-                if (await scriptLanguage.WritePageFragmentAsync(scope, fragment, token))
+                if (await scriptLanguage.WritePageFragmentAsync(scope, fragment, token).ConfigAwait())
                     break;
             }
         }
@@ -391,7 +401,7 @@ namespace ServiceStack.Script
                     if (HaltExecution || ShouldSkipFilterExecution(statement))
                         return;
 
-                    if (await scriptLanguage.WriteStatementAsync(scope, statement, token))
+                    if (await scriptLanguage.WriteStatementAsync(scope, statement, token).ConfigAwait())
                         break;
                 }
             }
@@ -456,7 +466,7 @@ namespace ServiceStack.Script
 
             if (Page != null)
             {
-                await Page.Init();
+                await Page.Init().ConfigAwait();
                 InitPageArgs(Page.Args);
             }
             else
@@ -524,66 +534,62 @@ namespace ServiceStack.Script
         {
             if (PageTransformers.Count == 0)
             {
-                await WritePageAsyncInternal(page, scope, token);
+                await WritePageAsyncInternal(page, scope, token).ConfigAwait();
                 return;
             }
 
             //If PageResult has any PageFilters Buffer and chain stream responses to each
-            using (var ms = MemoryStreamFactory.GetStream())
+            using var ms = MemoryStreamFactory.GetStream();
+            stackTrace.Push("PageTransformer");
+
+            await WritePageAsyncInternal(page, new ScriptScopeContext(this, ms, scope.ScopedParams), token).ConfigAwait();
+            Stream stream = ms;
+
+            foreach (var transformer in PageTransformers)
             {
-                stackTrace.Push("PageTransformer");
-
-                await WritePageAsyncInternal(page, new ScriptScopeContext(this, ms, scope.ScopedParams), token);
-                Stream stream = ms;
-
-                foreach (var transformer in PageTransformers)
-                {
-                    stream.Position = 0;
-                    stream = await transformer(stream);
-                }
-
-                using (stream)
-                {
-                    stream.Position = 0;
-                    await stream.WriteToAsync(scope.OutputStream, token);
-                }
-
-                stackTrace.Pop();
+                stream.Position = 0;
+                stream = await transformer(stream).ConfigAwait();
             }
+
+            using (stream)
+            {
+                stream.Position = 0;
+                await stream.WriteToAsync(scope.OutputStream, token).ConfigAwait();
+            }
+
+            stackTrace.Pop();
         }
 
         internal async Task WritePageAsyncInternal(SharpPage page, ScriptScopeContext scope, CancellationToken token = default(CancellationToken))
         {
-            await page.Init(); //reload modified changes if needed
+            await page.Init().ConfigAwait(); //reload modified changes if needed
 
-            await WriteFragmentsAsync(scope, page.PageFragments, "Page: " + page.VirtualPath, token);
+            await WriteFragmentsAsync(scope, page.PageFragments, "Page: " + page.VirtualPath, token).ConfigAwait();
         }
 
         public async Task WriteCodePageAsync(SharpCodePage page, ScriptScopeContext scope, CancellationToken token = default(CancellationToken))
         {
             if (PageTransformers.Count == 0)
             {
-                await WriteCodePageAsyncInternal(page, scope, token);
+                await WriteCodePageAsyncInternal(page, scope, token).ConfigAwait();
                 return;
             }
 
             //If PageResult has any PageFilters Buffer and chain stream responses to each
-            using (var ms = MemoryStreamFactory.GetStream())
+            using var ms = MemoryStreamFactory.GetStream();
+            await WriteCodePageAsyncInternal(page, new ScriptScopeContext(this, ms, scope.ScopedParams), token).ConfigAwait();
+            Stream stream = ms;
+
+            foreach (var transformer in PageTransformers)
             {
-                await WriteCodePageAsyncInternal(page, new ScriptScopeContext(this, ms, scope.ScopedParams), token);
-                Stream stream = ms;
+                stream.Position = 0;
+                stream = await transformer(stream).ConfigAwait();
+            }
 
-                foreach (var transformer in PageTransformers)
-                {
-                    stream.Position = 0;
-                    stream = await transformer(stream);
-                }
-
-                using (stream)
-                {
-                    stream.Position = 0;
-                    await stream.WriteToAsync(scope.OutputStream, token);
-                }
+            using (stream)
+            {
+                stream.Position = 0;
+                await stream.WriteToAsync(scope.OutputStream, token).ConfigAwait();
             }
         }
 
@@ -626,13 +632,13 @@ namespace ServiceStack.Script
             else 
                 stackTrace.Push($"{var.Expression.GetType().Name}: " + var.Expression.ToRawString().SubstringWithEllipsis(0, 200));
             
-            var value = await EvaluateAsync(var, scope, token);
+            var value = await EvaluateAsync(var, scope, token).ConfigAwait();
             if (value != IgnoreResult.Value)
             {
                 if (value != null)
                 {
                     var bytes = Format.EncodeValue(value).ToUtf8Bytes();
-                    await scope.OutputStream.WriteAsync(bytes, token);
+                    await scope.OutputStream.WriteAsync(bytes, token).ConfigAwait();
                 }
                 else
                 {
@@ -640,7 +646,7 @@ namespace ServiceStack.Script
                     {
                         var bytes = Context.OnUnhandledExpression(var);
                         if (bytes.Length > 0)
-                            await scope.OutputStream.WriteAsync(bytes, token);
+                            await scope.OutputStream.WriteAsync(bytes, token).ConfigAwait();
                     }
                 }
             }
@@ -756,7 +762,7 @@ namespace ServiceStack.Script
                     }
 
                     if (value is Task<object> valueObjectTask)
-                        value = await valueObjectTask;
+                        value = await valueObjectTask.ConfigAwait();
 
                     if (delegateInvoker != null)
                     {
@@ -792,7 +798,7 @@ namespace ServiceStack.Script
                         try
                         {
                             var taskResponse = (Task)contextBlockInvoker(filter, args);
-                            await taskResponse;
+                            await taskResponse.ConfigAwait();
 
                             if (hasFilterTransformers)
                             {
@@ -816,7 +822,7 @@ namespace ServiceStack.Script
                                                 args[1 + cmdIndex] = varValue;
                                             }
 
-                                            await (Task)contextBlockInvoker(filter, args);
+                                            await ((Task) contextBlockInvoker(filter, args)).ConfigAwait();
                                         }
                                         else
                                         {
@@ -824,7 +830,7 @@ namespace ServiceStack.Script
                                             if (transformer == null)
                                                 throw new NotSupportedException($"Could not find FilterTransformer '{var.FilterExpressions[exprIndex].Name}' in page '{Page.VirtualPath}'");
 
-                                            stream = await transformer(stream);
+                                            stream = await transformer(stream).ConfigAwait();
                                             useScope = useScope.ScopeWithStream(stream);
                                         }
                                     }
@@ -832,7 +838,7 @@ namespace ServiceStack.Script
                                     if (stream.CanRead)
                                     {
                                         stream.Position = 0;
-                                        await stream.WriteToAsync(scope.OutputStream, token);
+                                        await stream.WriteToAsync(scope.OutputStream, token).ConfigAwait();
                                     }
                                 }
                             }
@@ -844,7 +850,7 @@ namespace ServiceStack.Script
 
                             var exResult = Format.OnExpressionException(this, ex);
                             if (exResult != null)
-                                await scope.OutputStream.WriteAsync(Format.EncodeValue(exResult).ToUtf8Bytes(), token);
+                                await scope.OutputStream.WriteAsync(Format.EncodeValue(exResult).ToUtf8Bytes(), token).ConfigAwait();
                             else if (rethrow)
                                 throw;
 
@@ -855,7 +861,7 @@ namespace ServiceStack.Script
                     }
 
                     if (value is Task<object> valueTask)
-                        value = await valueTask;
+                        value = await valueTask.ConfigAwait();
                 }
                 catch (Exception ex)
                 {
@@ -864,6 +870,8 @@ namespace ServiceStack.Script
                     
                     LastFilterError = useEx;
                     LastFilterStackTrace = stackTrace.ToArray();
+
+                    Context.OnRenderException?.Invoke(this, ex);
 
                     if (RethrowExceptions)
                         throw useEx;
@@ -978,7 +986,7 @@ namespace ServiceStack.Script
                     }
                     else
                     {
-                        sb.Append($"{argsTypesWithoutContext[0].ParameterType.Name} | {mi.Name}(");
+                        sb.Append($"{argsTypesWithoutContext[0].ParameterType.Name} |> {mi.Name}(");
                         var piCount = 0;
                         foreach (var pi in argsTypesWithoutContext.Skip(1))
                         {
@@ -1108,7 +1116,7 @@ namespace ServiceStack.Script
             return value;
         }
 
-        internal bool TryGetValue(string name, ScriptScopeContext scope, out object value)
+        internal bool TryGetValue(string name, ScriptScopeContext scope, bool argsOnly, out object value)
         {
             if (name == null)
                 throw new ArgumentNullException(nameof(name));
@@ -1130,17 +1138,25 @@ namespace ServiceStack.Script
                                     ? obj
                                     : Context.Args.TryGetValue(name, out obj)
                                         ? obj
-                                        : (invoker = GetFilterAsBinding(name, out ScriptMethods filter)) != null
-                                            ? InvokeFilter(invoker, filter, new object[0], name)
-                                            : (invoker = GetContextFilterAsBinding(name, out filter)) != null
-                                                ? InvokeFilter(invoker, filter, new object[] {scope}, name)
-                                                : ((ret = false) ? (object) null : null);
+                                        : argsOnly 
+                                            ? null
+                                            : (invoker = GetFilterAsBinding(name, out var filter)) != null
+                                                ? InvokeFilter(invoker, filter, new object[0], name)
+                                                : (invoker = GetContextFilterAsBinding(name, out filter)) != null
+                                                    ? InvokeFilter(invoker, filter, new object[] {scope}, name)
+                                                    : ((ret = false) ? (object) null : null);
             return ret;
         }
         
         internal object GetValue(string name, ScriptScopeContext scope)
         {
-            TryGetValue(name, scope, out var value);
+            TryGetValue(name, scope, argsOnly:false, out var value);
+            return value;
+        }
+
+        internal object GetArgument(string name, ScriptScopeContext scope)
+        {
+            TryGetValue(name, scope, argsOnly:true, out var value);
             return value;
         }
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 using Funq;
@@ -21,6 +22,11 @@ namespace ServiceStack
     /// </summary>
     public interface IAppHost : IResolver
     {
+        /// <summary>
+        /// The base path ServiceStack is hosted on
+        /// </summary>
+        string PathBase { get; }
+        
         /// <summary>
         /// The assemblies reflected to find api services provided in the AppHost constructor
         /// </summary>
@@ -128,6 +134,11 @@ namespace ServiceStack
         void RegisterTypedRequestFilter<T>(Action<IRequest, IResponse, T> filterFn);
 
         /// <summary>
+        /// Add an Async Request Filter for a specific Request DTO Type
+        /// </summary>
+        void RegisterTypedRequestFilterAsync<T>(Func<IRequest, IResponse, T, Task> filterFn);
+
+        /// <summary>
         /// Add <seealso cref="ITypedFilter{T}"/> as a Typed Request Filter for a specific Request DTO Type
         /// </summary>
         /// <typeparam name="T">The DTO Type.</typeparam>
@@ -135,9 +146,21 @@ namespace ServiceStack
         void RegisterTypedRequestFilter<T>(Func<Container, ITypedFilter<T>> filter);
 
         /// <summary>
+        /// Add <seealso cref="ITypedFilterAsync{T}"/> as an Async Typed Request Filter for a specific Request DTO Type
+        /// </summary>
+        /// <typeparam name="T">The DTO Type.</typeparam>
+        /// <param name="filter">The <seealso cref="Container"/> methods to resolve the <seealso cref="ITypedFilterAsync{T}"/>.</param>
+        void RegisterTypedRequestFilterAsync<T>(Func<Container, ITypedFilterAsync<T>> filter);
+
+        /// <summary>
         /// Add Request Filter for a specific Response DTO Type
         /// </summary>
         void RegisterTypedResponseFilter<T>(Action<IRequest, IResponse, T> filterFn);
+
+        /// <summary>
+        /// Add an Async Request Filter for a specific Response DTO Type
+        /// </summary>
+        void RegisterTypedResponseFilterAsync<T>(Func<IRequest, IResponse, T, Task> filterFn);
 
         /// <summary>
         /// Add <seealso cref="ITypedFilter{T}"/> as a Typed Request Filter for a specific Request DTO Type
@@ -145,6 +168,13 @@ namespace ServiceStack
         /// <typeparam name="T">The DTO Type.</typeparam>
         /// <param name="filter">The <seealso cref="Container"/> methods to resolve the <seealso cref="ITypedFilter{T}"/>.</param>
         void RegisterTypedResponseFilter<T>(Func<Container, ITypedFilter<T>> filter);
+
+        /// <summary>
+        /// Add <seealso cref="ITypedFilterAsync{T}"/> as an Async Typed Request Filter for a specific Request DTO Type
+        /// </summary>
+        /// <typeparam name="T">The DTO Type.</typeparam>
+        /// <param name="filter">The <seealso cref="Container"/> methods to resolve the <seealso cref="ITypedFilterAsync{T}"/>.</param>
+        void RegisterTypedResponseFilterAsync<T>(Func<Container, ITypedFilterAsync<T>> filter);
 
         /// <summary>
         /// Add Request Filter for a specific MQ Request DTO Type
@@ -190,6 +220,16 @@ namespace ServiceStack
         /// Provide an exception handler for un-caught exceptions (Async)
         /// </summary>
         List<HandleUncaughtExceptionAsyncDelegate> UncaughtExceptionHandlersAsync { get; }
+
+        /// <summary>
+        /// Provide an exception handler for Service Gateway Exceptions
+        /// </summary>
+        List<HandleGatewayExceptionDelegate> GatewayExceptionHandlers { get; }
+
+        /// <summary>
+        /// Provide an exception handler for Service Gateway Exceptions (Async)
+        /// </summary>
+        List<HandleGatewayExceptionAsyncDelegate> GatewayExceptionHandlersAsync { get; }
 
         /// <summary>
         /// Provide callbacks to be fired after the AppHost has finished initializing
@@ -322,6 +362,11 @@ namespace ServiceStack
         /// Execute MQ Message in ServiceStack
         /// </summary>
         object ExecuteMessage(IMessage mqMessage);
+
+        /// <summary>
+        /// Execute MQ Message in ServiceStack
+        /// </summary>
+        Task<object> ExecuteMessageAsync(IMessage mqMessage, CancellationToken token=default);
         
         /// <summary>
         /// Access Service Controller for ServiceStack
@@ -340,13 +385,13 @@ namespace ServiceStack
 
         /// <summary>
         /// Evaluate Expressions in ServiceStack's ScriptContext.
-        /// Can be overriden if you want to customize how different expressions are evaluated.
+        /// Can be overridden if you want to customize how different expressions are evaluated.
         /// </summary>
         object EvalExpression(string expr);
 
         /// <summary>
         /// Evaluate Expressions in ServiceStack's ScriptContext.
-        /// Can be overriden if you want to customize how different expressions are evaluated.
+        /// Can be overridden if you want to customize how different expressions are evaluated.
         /// </summary>
         object EvalExpressionCached(string expr);
 

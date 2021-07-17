@@ -31,73 +31,7 @@ namespace ServiceStack
     {
         Task ExecuteAsync(T crudEvent);
     }
-
-    /// <summary>
-    /// Capture a CRUD Event
-    /// </summary>
-    public class CrudEvent : IMeta
-    {
-        [AutoIncrement]
-        public long Id { get; set; }
-        /// <summary>
-        /// AutoCrudOperation, e.g. Create, Update, Patch, Delete, Save
-        /// </summary>
-        public string EventType { get; set; }
-        /// <summary>
-        /// DB Model
-        /// </summary>
-        public string Model { get; set; }
-        /// <summary>
-        /// Primary Key of DB Model
-        /// </summary>
-        public string ModelId { get; set; }
-        /// <summary>
-        /// Date of Event (UTC)
-        /// </summary>
-        public DateTime EventDate { get; set; }
-        /// <summary>
-        /// Rows Updated if available
-        /// </summary>
-        public long? RowsUpdated { get; set; }
-        /// <summary>
-        /// Request DTO Type
-        /// </summary>
-        public string RequestType { get; set; }
-        /// <summary>
-        /// Serialized Request Body
-        /// </summary>
-        public string RequestBody { get; set; }
-        /// <summary>
-        /// UserAuthId if Authenticated
-        /// </summary>
-        public string UserAuthId { get; set; }
-        /// <summary>
-        /// UserName or unique User Identifier
-        /// </summary>
-        public string UserAuthName { get; set; }
-        /// <summary>
-        /// 
-        /// </summary>
-        public string RemoteIp { get; set; }
-        /// <summary>
-        /// URN format: urn:{requesttype}:{ModelId}
-        /// </summary>
-        public string Urn { get; set; }
-
-        /// <summary>
-        /// Custom Reference Data with integer Primary Key
-        /// </summary>
-        public int? RefId { get; set; }
-        /// <summary>
-        /// Custom Reference Data with non-integer Primary Key
-        /// </summary>
-        public string RefIdStr { get; set; }
-        /// <summary>
-        /// Custom Metadata to attach to this event
-        /// </summary>
-        public Dictionary<string, string> Meta { get; set; }
-    }
-
+    
     public abstract class CrudEventsBase<T>
         where T : CrudEvent
     {
@@ -193,18 +127,18 @@ namespace ServiceStack
 
             if (crudEvent.UserAuthId != null)
             {
-                if (!req.GetSessionFromSource(crudEvent.UserAuthId, null,
-                    out var session, out var roles, out var permissions))
-                {
+                var result = await req.GetSessionFromSourceAsync(crudEvent.UserAuthId, validator:null).ConfigAwait(); 
+                if (result == null)
                     throw new NotSupportedException("An AuthRepository or IUserSessionSource is required Execute Authenticated AutoCrudEvents");
-                }
+
+                var session = result.Session;
 
                 if (session.UserAuthName == null)
                     session.UserAuthName = session.UserName ?? session.Email;
                 if (session.Roles == null)
-                    session.Roles = roles?.ToList();
+                    session.Roles = result.Roles?.ToList();
                 if (session.Permissions == null)
-                    session.Permissions = permissions?.ToList();
+                    session.Permissions = result.Permissions?.ToList();
 
                 req.Items[Keywords.Session] = session;
             }
@@ -229,14 +163,14 @@ namespace ServiceStack
             {
                 foreach (var requestFilter in RequestFiltersAsync)
                 {
-                    await requestFilter(req, req.Response, req.Dto);
+                    await requestFilter(req, req.Response, req.Dto).ConfigAwait();
                     
                     if (req.Response.IsClosed)
                         throw new UnauthorizedAccessException($"RequestFiltersAsync short-circuited request denying executing {typeof(T).Name} {crudEvent.Id}");
                 }
             }
             
-            await ServiceExecutor.ExecuteAsync(requestDto, req);
+            await ServiceExecutor.ExecuteAsync(requestDto, req).ConfigAwait();
         }
     }
 
@@ -319,12 +253,16 @@ namespace ServiceStack
             } while (results.Count > 0);
         }
 
-        public IEnumerable<T> GetEvents(IDbConnection db, string table, string id)
+        public IEnumerable<T> GetEvents(IDbConnection db, string table, string id=null)
         {
             var q = db.From<T>()
-                .Where(x => x.Model == table && x.ModelId == id)
-                .OrderBy(x => x.Id);
-            return db.Select<T>(q);
+                .Where(x => x.Model == table);
+            if (id != null)
+            {
+                q.And(x =>  x.ModelId == id);
+            }
+            q.OrderBy(x => x.Id);
+            return db.Select(q);
         }
 
         /// <summary>
@@ -355,17 +293,13 @@ namespace ServiceStack
         {
             if (!ExcludePrimaryDb)
             {
-                using (var db = DbFactory.OpenDbConnection())
-                {
-                    db.DeleteAll<T>();
-                }
+                using var db = DbFactory.OpenDbConnection();
+                db.DeleteAll<T>();
             }
             foreach (var namedConnection in NamedConnections)
             {
-                using (var db = DbFactory.OpenDbConnection(namedConnection))
-                {
-                    db.DeleteAll<T>();
-                }
+                using var db = DbFactory.OpenDbConnection(namedConnection);
+                db.DeleteAll<T>();
             }
         }
 

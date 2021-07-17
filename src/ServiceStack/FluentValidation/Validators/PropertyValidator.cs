@@ -1,5 +1,5 @@
 #region License
-// Copyright (c) Jeremy Skinner (http://www.jeremyskinner.co.uk)
+// Copyright (c) .NET Foundation and contributors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,44 +13,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// The latest version of this file can be found at https://github.com/jeremyskinner/FluentValidation
+// The latest version of this file can be found at https://github.com/FluentValidation/FluentValidation
 #endregion
-
-using System.Threading;
 
 namespace ServiceStack.FluentValidation.Validators {
 	using System;
 	using System.Collections.Generic;
 	using System.Linq;
-	using System.Linq.Expressions;
+	using System.Threading;
 	using System.Threading.Tasks;
-	using FluentValidation.Internal;
+	using Internal;
 	using Resources;
 	using Results;
 
-	public abstract class PropertyValidator : IPropertyValidator {
-		public PropertyValidatorOptions Options { get; } = new PropertyValidatorOptions();
+	public abstract class PropertyValidator : PropertyValidatorOptions, IPropertyValidator {
 
+		/// <inheritdoc />
+		//TODO: For FV 10 make this an explicit implementation.
+		public PropertyValidatorOptions Options => this;
+
+		[Obsolete("This constructor is deprecated and will be removed in FluentValidation 10. Override the GetDefaultMessageTemplate method instead.")]
 		protected PropertyValidator(IStringSource errorMessageSource) {
 			if(errorMessageSource == null) errorMessageSource = new StaticStringSource("No default error message has been specified.");
 			else if (errorMessageSource is LanguageStringSource l && l.ErrorCodeFunc == null)
-				l.ErrorCodeFunc = ctx => Options.ErrorCodeSource?.GetString(ctx);
+				l.ErrorCodeFunc = ctx => ErrorCodeSource?.GetString(ctx);
 
-			Options.ErrorMessageSource = errorMessageSource;
+			ErrorMessageSource = errorMessageSource;
 		}
 
-		[Obsolete("This constructor will be removed in FluentValidation 9.0. Use the overload that takes an IStringSource instead, passing in a LazyStringSource: PropertyValidator(new LazyStringSource(ctx => MyResourceClass.MyResourceName))")]
-		protected PropertyValidator(string errorMessageResourceName, Type errorMessageResourceType) {
-			errorMessageResourceName.Guard("errorMessageResourceName must be specified.", nameof(errorMessageResourceName));
-			errorMessageResourceType.Guard("errorMessageResourceType must be specified.", nameof(errorMessageResourceType));
-
-			Options.ErrorMessageSource = new LocalizedStringSource(errorMessageResourceType, errorMessageResourceName);
-		}
-
+		[Obsolete("This constructor is deprecated and will be removed in FluentValidation 10. Override the GetDefaultMessageTemplate method instead.")]
 		protected PropertyValidator(string errorMessage) {
-			Options.ErrorMessageSource = new StaticStringSource(errorMessage);
+			SetErrorMessage(errorMessage);
 		}
 
+		protected PropertyValidator() {
+		}
+
+		/// <summary>
+		/// Retrieves a localized string from the LanguageManager.
+		/// If an ErrorCode is defined for this validator, the error code is used as the key.
+		/// If no ErrorCode is defined (or the language manager doesn't have a translation for the error code)
+		/// then the fallback key is used instead.
+		/// </summary>
+		/// <param name="fallbackKey">The fallback key to use for translation, if no ErrorCode is available.</param>
+		/// <returns>The translated error message template.</returns>
+		protected string Localized(string fallbackKey) {
+			var errorCode = ErrorCode;
+
+			if (errorCode != null) {
+				string result = ValidatorOptions.Global.LanguageManager.GetString(errorCode);
+
+				if (!string.IsNullOrEmpty(result)) {
+					return result;
+				}
+			}
+
+			return ValidatorOptions.Global.LanguageManager.GetString(fallbackKey);
+		}
+
+
+		/// <inheritdoc />
 		public virtual IEnumerable<ValidationFailure> Validate(PropertyValidatorContext context) {
 			if (IsValid(context)) return Enumerable.Empty<ValidationFailure>();
 
@@ -59,6 +81,7 @@ namespace ServiceStack.FluentValidation.Validators {
 
 		}
 
+		/// <inheritdoc />
 		public virtual async Task<IEnumerable<ValidationFailure>> ValidateAsync(PropertyValidatorContext context, CancellationToken cancellation) {
 			if (await IsValidAsync(context, cancellation)) return Enumerable.Empty<ValidationFailure>();
 
@@ -66,10 +89,11 @@ namespace ServiceStack.FluentValidation.Validators {
 			return new[] {CreateValidationError(context)};
 		}
 
-		public virtual bool ShouldValidateAsync(ValidationContext context) {
+		/// <inheritdoc />
+		public virtual bool ShouldValidateAsynchronously(IValidationContext context) {
 			// If the user has applied an async condition, then always go through the async path
 			// even if validator is being run synchronously.
-			if (Options.AsyncCondition != null) return true;
+			if (HasAsyncCondition) return true;
 			return false;
 		}
 
@@ -88,6 +112,18 @@ namespace ServiceStack.FluentValidation.Validators {
 		protected virtual void PrepareMessageFormatterForValidationError(PropertyValidatorContext context) {
 			context.MessageFormatter.AppendPropertyName(context.DisplayName);
 			context.MessageFormatter.AppendPropertyValue(context.PropertyValue);
+
+			// If there's a collection index cached in the root context data then add it
+			// to the message formatter. This happens when a child validator is executed
+			// as part of a call to RuleForEach. Usually parameters are not flowed through to
+			// child validators, but we make an exception for collection indices.
+			if (context.ParentContext.RootContextData.TryGetValue("__FV_CollectionIndex", out var index)) {
+				// If our property validator has explicitly added a placeholder for the collection index
+				// don't overwrite it with the cached version.
+				if (!context.MessageFormatter.PlaceholderValues.ContainsKey("CollectionIndex")) {
+					context.MessageFormatter.AppendArgument("CollectionIndex", index);
+				}
+			}
 		}
 
 		/// <summary>
@@ -96,25 +132,29 @@ namespace ServiceStack.FluentValidation.Validators {
 		/// <param name="context">The validator context</param>
 		/// <returns>Returns an error validation result.</returns>
 		protected virtual ValidationFailure CreateValidationError(PropertyValidatorContext context) {
-			var messageBuilderContext = new MessageBuilderContext(context, Options.ErrorMessageSource, this);
+			var messageBuilderContext = new MessageBuilderContext(context, this);
 
 			var error = context.Rule.MessageBuilder != null
 				? context.Rule.MessageBuilder(messageBuilderContext)
 				: messageBuilderContext.GetDefaultMessage();
 
 			var failure = new ValidationFailure(context.PropertyName, error, context.PropertyValue);
+#pragma warning disable 618
 			failure.FormattedMessageArguments = context.MessageFormatter.AdditionalArguments;
+#pragma warning restore 618
 			failure.FormattedMessagePlaceholderValues = context.MessageFormatter.PlaceholderValues;
-			failure.ResourceName = Options.ErrorMessageSource.ResourceName;
-			failure.ErrorCode = (Options.ErrorCodeSource != null)
-				? Options.ErrorCodeSource.GetString(context)
-				: ValidatorOptions.ErrorCodeResolver(this);
+#pragma warning disable 618
+			failure.ErrorCode = ErrorCodeSource?.GetString(context) ?? ValidatorOptions.Global.ErrorCodeResolver(this);
+#pragma warning restore 618
 
-			if (Options.CustomStateProvider != null) {
-				failure.CustomState = Options.CustomStateProvider(context);
+			if (CustomStateProvider != null) {
+				failure.CustomState = CustomStateProvider(context);
 			}
 
-			failure.Severity = Options.Severity;
+			if (SeverityProvider != null) {
+				failure.Severity = SeverityProvider(context);
+			}
+
 			return failure;
 		}
 	}

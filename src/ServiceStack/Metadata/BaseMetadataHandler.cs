@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Web.UI;
 using ServiceStack.Host;
 using ServiceStack.Web;
 using System.Text;
@@ -25,7 +24,7 @@ namespace ServiceStack.Metadata
                 return;
 
             httpRes.ContentType = "text/html; charset=utf-8";
-            await ProcessOperationsAsync(httpRes.OutputStream, httpReq, httpRes);
+            await ProcessOperationsAsync(httpRes.OutputStream, httpReq, httpRes).ConfigAwait();
 
             await httpRes.EndHttpHandlerRequestAsync(skipHeaders:true);
         }

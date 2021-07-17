@@ -246,7 +246,7 @@ Uppercase: CHERRY, Lowercase: cherry
             Assert.That(context.EvaluateScript(@"
 {{ [5, 4, 1, 3, 9, 8, 6, 7, 2, 0] |> assignTo: numbers }}
 {{ ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'] |> assignTo: strings }}
-{{ numbers |> select: The digit { strings[it] } is { 'even' |> if (isEven(it)) |> otherwise('odd') }.\n }}
+{{ numbers |> select: The digit { strings[it] } is { it.isEven() ? 'even' : 'odd' }.\n }}
 ").NormalizeNewLines(),
                 
                 Does.StartWith(@"
@@ -1505,7 +1505,7 @@ Second number > 5: 8
         { 
             Assert.That(context.EvaluateScript(@"
 {{ range(100,50)
-   |> select: The number {it} is { 'even' |> if(isEven(it)) |> otherwise('odd') }.\n }} 
+   |> select: The number {it} is { it.isEven() ? 'even' : 'odd' }.\n }} 
 ").NormalizeNewLines(),
                 
                 Does.StartWith(@"
@@ -1911,7 +1911,7 @@ The average number is 4.5.".NormalizeNewLines()));
 ").NormalizeNewLines(),
                 
                 Does.StartWith(@"
-The average word length is 6.66666666666667 characters.".NormalizeNewLines()));
+The average word length is 6.6666666666666".NormalizeNewLines()));
         }
       
         [Test]
@@ -1922,7 +1922,9 @@ The average word length is 6.66666666666667 characters.".NormalizeNewLines()));
    |> groupBy: it.Category
    |> let({ category: 'it.Key', averagePrice: 'average(it, `it.UnitPrice`)' }) 
    |> select: Category: {category}, AveragePrice: {averagePrice}\n }} 
-").NormalizeNewLines(),
+").NormalizeNewLines() 
+    .Replace("37.979166666666664","37.9791666666667") //.NET Core 3.1
+    .Replace("54.00666666666667","54.0066666666667"),
                 
                 Does.StartWith(@"
 Category: Beverages, AveragePrice: 37.9791666666667

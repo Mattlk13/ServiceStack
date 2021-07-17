@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using ServiceStack.Data;
 using ServiceStack.NativeTypes;
 using ServiceStack.OrmLite;
@@ -7,6 +8,49 @@ using ServiceStack.Web;
 
 namespace ServiceStack
 {
+    public class AutoGenContext
+    {
+        public AutoGenContext(CrudCodeGenTypes instruction, string tableName, TableSchema tableSchema)
+        {
+            Instruction = instruction;
+            TableName = tableName;
+            TableSchema = tableSchema;
+        }
+
+        /// <summary>
+        /// AutoGen Request DTO Instruction
+        /// </summary>
+        public CrudCodeGenTypes Instruction { get; set; }
+        /// <summary>
+        /// Original Table Name
+        /// </summary>
+        public string TableName { get; }
+        /// <summary>
+        /// RDBMS TableSchema
+        /// </summary>
+        public TableSchema TableSchema { get; }
+        
+        /// <summary>
+        /// Generated DataModel Name to use 
+        /// </summary>
+        public string DataModelName { get; set; }
+        
+        /// <summary>
+        /// Generated DataModel Name to use for Query Services 
+        /// </summary>
+        public string PluralDataModelName { get; set; }
+
+        /// <summary>
+        /// Generated Route Path base to use 
+        /// </summary>
+        public string RoutePathBase { get; set; }
+        
+        /// <summary>
+        /// Generated Request DTO Name to use per operation: Query, Create, Update, Patch, Delete
+        /// </summary>
+        public Dictionary<string,string> OperationNames { get; set; } = new Dictionary<string, string>();
+    }
+    
     public interface IGenerateCrudServices
     {
         List<string> IncludeCrudOperations { get; set; }
@@ -15,15 +59,18 @@ namespace ServiceStack
         /// Generate services 
         /// </summary>
         List<CreateCrudServices> CreateServices { get; set; }
+        Action<AutoGenContext> GenerateOperationsFilter { get; set; }
         Func<ColumnSchema, IOrmLiteDialectProvider, Type> ResolveColumnType { get; set; }
         Action<MetadataTypes, MetadataTypesConfig, IRequest> MetadataTypesFilter { get; set; }
         Action<MetadataType, IRequest> TypeFilter { get; set; }
         Action<MetadataOperationType, IRequest> ServiceFilter { get; set; }
         Func<MetadataType, bool> IncludeType { get; set; }
         Func<MetadataOperationType, bool> IncludeService { get; set; }
+        bool AddDataContractAttributes { get; set; }
+        bool AddIndexesToDataMembers { get; set; }
         string AccessRole { get; set; }
-        Dictionary<Type, string[]> ServiceRoutes { get; set; }
-        DbSchema GetCachedDbSchema(IDbConnectionFactory dbFactory, string schema = null, string namedConnection = null);
+        DbSchema GetCachedDbSchema(IDbConnectionFactory dbFactory, string schema = null, string namedConnection = null,
+            List<string> includeTables = null, List<string> excludeTables = null);
         void Register(IAppHost appHost);
         List<Type> GenerateMissingServices(AutoQueryFeature feature);
     }
@@ -60,6 +107,14 @@ namespace ServiceStack
             return type;
         }
 
+        public static MetadataType AddAttributeIfNotExists<T>(this MetadataType type, T attr, Func<T, bool> test=null)
+            where T : Attribute
+        {
+            return type.Attributes?.Any(x => x.Attribute is T t && (test == null || test(t))) == true 
+                ? type 
+                : AddAttribute(type, attr);
+        }
+
         public static MetadataPropertyType AddAttribute(this MetadataPropertyType propType, Attribute attr)
         {
             var nativeTypesGen = HostContext.AssertPlugin<NativeTypesFeature>().DefaultGenerator;
@@ -68,13 +123,21 @@ namespace ServiceStack
             propType.Attributes.Add(metaAttr);
             return propType;
         }
+
+        public static MetadataPropertyType AddAttributeIfNotExists<T>(this MetadataPropertyType propType, T attr, Func<T, bool> test=null)
+            where T : Attribute
+        {
+            return propType.Attributes?.Any(x => x.Attribute is T t && (test == null || test(t))) == true 
+                ? propType 
+                : AddAttribute(propType, attr);
+        }
     }
 
 
     /// <summary>
     /// Instruction for which AutoCrud Services to generate
     /// </summary>
-    public class CreateCrudServices
+    public class CreateCrudServices : IMeta
     {
         /// <summary>
         /// Which AutoCrud Operations to include:
@@ -102,19 +165,31 @@ namespace ServiceStack
         public List<string> AddNamespaces { get; set; }
 
         /// <summary>
-        /// Is used as a Whitelist to specify only the types you would like to have code-generated, see:
+        /// Allow List to specify only the tables you would like to have code-generated
+        /// </summary>
+        public List<string> IncludeTables { get; set; }
+
+        /// <summary>
+        /// Block list to specify which tables you would like excluded from being generated
+        /// </summary>
+        public List<string> ExcludeTables { get; set; }
+
+        /// <summary>
+        /// Allow List to specify only the types you would like to have code-generated, see:
         /// https://docs.servicestack.net/csharp-add-servicestack-reference#includetypes
         /// </summary>
         public List<string> IncludeTypes { get; set; }
 
         /// <summary>
-        /// Is used as a Blacklist to specify which types you would like excluded from being generated. see:
+        /// Block list to specify which types you would like excluded from being generated. see:
         /// https://docs.servicestack.net/csharp-add-servicestack-reference#excludetypes
         /// </summary>
         public List<string> ExcludeTypes { get; set; }
+
+        public Dictionary<string, string> Meta { get; set; }
     }
 
-    public class CrudCodeGenTypes : NativeTypesBase, IReturn<string>
+    public class CrudCodeGenTypes : NativeTypesBase, IMeta, IReturn<string>
     {
         /// <summary>
         /// Either 'all' to include all AutoQuery Services or 'new' to include only missing Services and Types
@@ -164,6 +239,18 @@ namespace ServiceStack
         /// Do not use cached DB Table Schemas, re-fetch latest 
         /// </summary>
         public bool? NoCache { get; set; }
+
+        /// <summary>
+        /// Allow List to specify only the tables you would like to have code-generated
+        /// </summary>
+        public List<string> IncludeTables { get; set; }
+
+        /// <summary>
+        /// Block list to specify which tables you would like excluded from being generated
+        /// </summary>
+        public List<string> ExcludeTables { get; set; }
+
+        public Dictionary<string, string> Meta { get; set; }
     }
 
     public class CrudTables : IReturn<AutoCodeSchemaResponse>
@@ -171,6 +258,17 @@ namespace ServiceStack
         public string Schema { get; set; }
         public string NamedConnection { get; set; }
         public string AuthSecret { get; set; }
+
+        /// <summary>
+        /// Allow List to specify only the tables you would like to have code-generated
+        /// </summary>
+        public List<string> IncludeTables { get; set; }
+
+        /// <summary>
+        /// Block list to specify which tables you would like excluded from being generated
+        /// </summary>
+        public List<string> ExcludeTables { get; set; }
+
         public bool? NoCache { get; set; }
     }
 

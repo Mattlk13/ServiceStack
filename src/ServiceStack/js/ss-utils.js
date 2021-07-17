@@ -65,6 +65,7 @@
     };
     $.ss.queryString = function (url) {
         if (!url || url.indexOf('?') === -1) return {};
+        url = $.ss.splitOnFirst(url,'#')[0];
         var pairs = $.ss.splitOnFirst(url, '?')[1].split('&');
         var map = {};
         for (var i = 0; i < pairs.length; ++i) {
@@ -669,9 +670,10 @@
         }
     };
     $.ss.onUnload = function () {
-        if ($.ss.unRegisterUrl) {
+        if (navigator.sendBeacon)
+            navigator.sendBeacon($.ss.unRegisterUrl);
+        else
             $.ajax({ type: 'POST', url: $.ss.unRegisterUrl, async: false });
-        }
     };
     $.fn.handleServerEvents = function (opt) {
         $.ss.eventSource = this[0];
@@ -721,7 +723,7 @@
                         $.ss.CONNECT_ID = $.ss.CONNECT_ID ? $.ss.CONNECT_ID + 1 : 1;
                         (function(connectId) {
                             function sendHeartbeat() {
-                                if (connectId !== $.ss.CONNECT_ID) // Only allow latest connections heartbeat callback through 
+                                if ($.ss.eventSource == null || connectId !== $.ss.CONNECT_ID) // Only allow latest connections heartbeat callback through 
                                     return;
                                 if ($.ss.eventSource.readyState === 2) //CLOSED
                                 {

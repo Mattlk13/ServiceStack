@@ -56,13 +56,13 @@ namespace ServiceStack
             {
                 filter(req, request);
                 if (req.Response.IsClosed)
-                    return default(TResponse);
+                    return default;
             }
             foreach (var filter in HostContext.AppHost.GatewayRequestFiltersAsyncArray)
             {
                 filter(req, request).Wait();
                 if (req.Response.IsClosed)
-                    return default(TResponse);
+                    return default;
             }
 
             ExecValidators(request).Wait();
@@ -70,6 +70,17 @@ namespace ServiceStack
             var response = HostContext.ServiceController.Execute(request, req);
             if (response is Task responseTask)
                 response = responseTask.GetResult();
+#if NET472 || NETSTANDARD2_0                
+            else if (response is ValueTask<object> valueTaskResponse)
+            {
+                response = valueTaskResponse.GetAwaiter().GetResult();
+            }
+            else if (response is ValueTask valueTaskVoid)
+            {
+                valueTaskVoid.GetAwaiter().GetResult();
+                response = null;
+            }
+#endif
 
             if (response is Task[] batchResponseTasks)
             {
@@ -88,13 +99,13 @@ namespace ServiceStack
             {
                 filter(req, responseDto);
                 if (req.Response.IsClosed)
-                    return default(TResponse);
+                    return default;
             }
             foreach (var filter in HostContext.AppHost.GatewayResponseFiltersAsyncArray)
             {
                 filter(req, responseDto).Wait();
                 if (req.Response.IsClosed)
-                    return default(TResponse);
+                    return default;
             }
 
             return responseDto;
@@ -146,7 +157,7 @@ namespace ServiceStack
                 if (validator != null)
                 {
                     var ruleSet = (string) (req.GetItem(Keywords.InvokeVerb) ?? req.Verb);
-                    var validationContext = new ValidationContext(request, null, new MultiRuleSetValidatorSelector(ruleSet))
+                    var validationContext = new ValidationContext<object>(request, null, new MultiRuleSetValidatorSelector(ruleSet))
                     {
                         Request = req
                     };
@@ -154,6 +165,7 @@ namespace ServiceStack
                     ValidationResult result;
                     if (!validator.HasAsyncValidators(validationContext))
                     {
+                        // ReSharper disable once MethodHasAsyncOverload
                         result = validator.Validate(validationContext);
                     }
                     else
@@ -189,6 +201,17 @@ namespace ServiceStack
             {
                 return ExecSync<TResponse>(requestDto);
             }
+            catch (AggregateException ae)
+            {
+                var ex = ae.UnwrapIfSingleException();
+                HostContext.RaiseGatewayException(req, requestDto, ex).Wait();
+                throw ex;
+            }
+            catch (Exception ex)
+            {
+                HostContext.RaiseGatewayException(req, requestDto, ex).Wait();
+                throw;
+            }
             finally
             {
                 req.Dto = holdDto;
@@ -211,6 +234,11 @@ namespace ServiceStack
             {
                 var response = await ExecAsync<TResponse>(requestDto);
                 return response;
+            }
+            catch (Exception ex)
+            {
+                await HostContext.RaiseGatewayException(req, requestDto, ex);
+                throw;
             }
             finally
             {
@@ -247,6 +275,17 @@ namespace ServiceStack
             {
                 return ExecSync<TResponse[]>(typedArray).ToList();
             }
+            catch (AggregateException ae)
+            {
+                var ex = ae.UnwrapIfSingleException();
+                HostContext.RaiseGatewayException(req, requestDtos, ex).Wait();
+                throw ex;
+            }
+            catch (Exception ex)
+            {
+                HostContext.RaiseGatewayException(req, requestDtos, ex).Wait();
+                throw;
+            }
             finally
             {
                 req.Dto = holdDto;
@@ -255,7 +294,7 @@ namespace ServiceStack
             }
         }
 
-        public Task<List<TResponse>> SendAllAsync<TResponse>(IEnumerable<object> requestDtos, CancellationToken token = new CancellationToken())
+        public async Task<List<TResponse>> SendAllAsync<TResponse>(IEnumerable<object> requestDtos, CancellationToken token = new CancellationToken())
         {
             var holdDto = req.Dto;
             var holdAttrs = req.RequestAttributes;
@@ -265,14 +304,22 @@ namespace ServiceStack
             req.SetItem(Keywords.InvokeVerb, HttpMethods.Post);
             req.SetInProcessRequest();
 
-            var responseTask = ExecAsync<TResponse[]>(typedArray);
-            return HostContext.Async.ContinueWith(req, responseTask, task => 
-                {
-                    req.Dto = holdDto;
-                    req.RequestAttributes = holdAttrs;
-                    ResetVerb(holdVerb);
-                    return task.Result.ToList();
-                }, token);
+            try
+            {
+                var response = await ExecAsync<TResponse[]>(typedArray);
+                return response.ToList();
+            }
+            catch (Exception ex)
+            {
+                await HostContext.RaiseGatewayException(req, requestDtos, ex);
+                throw;
+            }
+            finally
+            {
+                req.Dto = holdDto;
+                req.RequestAttributes = holdAttrs;
+                ResetVerb(holdVerb);
+            }
         }
 
         public void Publish(object requestDto)
@@ -289,6 +336,11 @@ namespace ServiceStack
             try
             {
                 var response = HostContext.ServiceController.Execute(requestDto, req);
+            }
+            catch (Exception ex)
+            {
+                HostContext.RaiseGatewayException(req, requestDto, ex).Wait();
+                throw;
             }
             finally
             {
@@ -310,12 +362,22 @@ namespace ServiceStack
             req.RequestAttributes |= RequestAttributes.OneWay;
             req.RequestAttributes |= RequestAttributes.InProcess;
 
-            await HostContext.ServiceController.GatewayExecuteAsync(requestDto, req, applyFilters: false);
-
-            req.Dto = holdDto;
-            req.OperationName = holdOp;
-            req.RequestAttributes = holdAttrs;
-            ResetVerb(holdVerb);
+            try
+            {
+                await HostContext.ServiceController.GatewayExecuteAsync(requestDto, req, applyFilters: false);
+            }
+            catch (Exception ex)
+            {
+                await HostContext.RaiseGatewayException(req, requestDto, ex);
+                throw;
+            }
+            finally
+            {
+                req.Dto = holdDto;
+                req.OperationName = holdOp;
+                req.RequestAttributes = holdAttrs;
+                ResetVerb(holdVerb);
+            }
         }
 
         public void PublishAll(IEnumerable<object> requestDtos)
@@ -333,6 +395,11 @@ namespace ServiceStack
             try
             {
                 var response = HostContext.ServiceController.Execute(typedArray, req);
+            }
+            catch (Exception ex)
+            {
+                HostContext.RaiseGatewayException(req, requestDtos, ex).Wait();
+                throw;
             }
             finally
             {
@@ -353,11 +420,21 @@ namespace ServiceStack
             req.RequestAttributes &= ~RequestAttributes.Reply;
             req.RequestAttributes |= RequestAttributes.OneWay;
 
-            await HostContext.ServiceController.GatewayExecuteAsync(typedArray, req, applyFilters: false);
-
-            req.Dto = holdDto;
-            req.RequestAttributes = holdAttrs;
-            ResetVerb(holdVerb);
+            try
+            {
+                await HostContext.ServiceController.GatewayExecuteAsync(typedArray, req, applyFilters: false);
+            }
+            catch (Exception ex)
+            {
+                await HostContext.RaiseGatewayException(req, requestDtos, ex);
+                throw;
+            }
+            finally
+            {
+                req.Dto = holdDto;
+                req.RequestAttributes = holdAttrs;
+                ResetVerb(holdVerb);
+            }
         }
     }
 }

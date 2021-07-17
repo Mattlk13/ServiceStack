@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 using ServiceStack.Auth;
 using ServiceStack.Web;
 
@@ -103,6 +105,22 @@ namespace ServiceStack
             return this.Permissions != null && this.Permissions.Contains(permission);
         }
 
+        public virtual async Task<bool> HasPermissionAsync(string permission, IAuthRepositoryAsync authRepo, CancellationToken token=default)
+        {
+            if (!FromToken) //If populated from a token it should have the complete list of permissions
+            {
+                if (authRepo is IManageRolesAsync managesRoles)
+                {
+                    if (UserAuthId == null)
+                        return false;
+
+                    return await managesRoles.HasPermissionAsync(this.UserAuthId, permission, token);
+                }
+            }
+
+            return this.Permissions != null && this.Permissions.Contains(permission);
+        }
+
         public virtual bool HasRole(string role, IAuthRepository authRepo)
         {
             if (!FromToken) //If populated from a token it should have the complete list of roles
@@ -119,13 +137,42 @@ namespace ServiceStack
             return this.Roles != null && this.Roles.Contains(role);
         }
 
-        public virtual void OnRegistered(IRequest httpReq, IAuthSession session, IServiceBase service) {}
-        public virtual void OnAuthenticated(IServiceBase authService, IAuthSession session, IAuthTokens tokens, Dictionary<string, string> authInfo) { }
-        public virtual void OnLogout(IServiceBase authService) {}
-        public virtual void OnCreated(IRequest httpReq) {}
+        public virtual async Task<bool> HasRoleAsync(string role, IAuthRepositoryAsync authRepo, CancellationToken token=default)
+        {
+            if (!FromToken) //If populated from a token it should have the complete list of roles
+            {
+                if (authRepo is IManageRolesAsync managesRoles)
+                {
+                    if (UserAuthId == null)
+                        return false;
+
+                    return await managesRoles.HasRoleAsync(this.UserAuthId, role, token);
+                }
+            }
+
+            return this.Roles != null && this.Roles.Contains(role);
+        }
 
         public virtual void OnLoad(IRequest httpReq) {}
+        public virtual void OnCreated(IRequest httpReq) {}
+
+        public virtual void OnRegistered(IRequest httpReq, IAuthSession session, IServiceBase service) {}
+
+        public virtual Task OnRegisteredAsync(IRequest httpReq, IAuthSession session, IServiceBase service, CancellationToken token = default) =>
+            TypeConstants.EmptyTask;
+
+        public virtual void OnAuthenticated(IServiceBase authService, IAuthSession session, IAuthTokens tokens, Dictionary<string, string> authInfo) { }
+
+        public virtual Task OnAuthenticatedAsync(IServiceBase authService, IAuthSession session, IAuthTokens tokens, Dictionary<string, string> authInfo,
+            CancellationToken token = default) => TypeConstants.EmptyTask;
+
+        public virtual void OnLogout(IServiceBase authService) {}
+        public virtual Task OnLogoutAsync(IServiceBase authService, CancellationToken token = default) => TypeConstants.EmptyTask;
+
+        
         public virtual IHttpResult Validate(IServiceBase authService, IAuthSession session, IAuthTokens tokens, Dictionary<string, string> authInfo) => null;
+        public virtual Task<IHttpResult> ValidateAsync(IServiceBase authService, IAuthSession session, IAuthTokens tokens, Dictionary<string, string> authInfo,
+            CancellationToken token = default) => ((IHttpResult)null).InTask();
     }
 
     public class WebSudoAuthUserSession : AuthUserSession, IWebSudoAuthSession

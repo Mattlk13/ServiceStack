@@ -4,11 +4,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.Serialization;
+using System.Threading.Tasks;
 using ServiceStack.Auth;
+using ServiceStack.Caching;
 using ServiceStack.Configuration;
 using ServiceStack.Data;
 using ServiceStack.DataAnnotations;
+using ServiceStack.FluentValidation.Internal;
 using ServiceStack.Host;
+using ServiceStack.Logging;
 using ServiceStack.NativeTypes;
 using ServiceStack.NativeTypes.CSharp;
 using ServiceStack.NativeTypes.Dart;
@@ -19,6 +24,7 @@ using ServiceStack.NativeTypes.Swift;
 using ServiceStack.NativeTypes.TypeScript;
 using ServiceStack.NativeTypes.VbNet;
 using ServiceStack.OrmLite;
+using ServiceStack.Text;
 using ServiceStack.Web;
 
 namespace ServiceStack
@@ -26,6 +32,8 @@ namespace ServiceStack
     //TODO: persist AutoCrud
     public class GenerateCrudServices : IGenerateCrudServices
     {
+        private static ILog log = LogManager.GetLogger(typeof(GenerateCrudServices));
+        
         public List<string> IncludeCrudOperations { get; set; } = new List<string> {
             AutoCrudOperation.Query,
             AutoCrudOperation.Create,
@@ -38,6 +46,31 @@ namespace ServiceStack
         /// Generate services 
         /// </summary>
         public List<CreateCrudServices> CreateServices { get; set; } = new List<CreateCrudServices>();
+
+        /// <summary>
+        /// Customize AutoGen Operation Generation
+        /// </summary>
+        public Action<AutoGenContext> GenerateOperationsFilter { get; set; }
+
+        /// <summary>
+        /// Auto Register AutoQuery and Crud Services for Default DB
+        /// </summary>
+        public bool AutoRegister
+        {
+            get => this.CreateServices.Any(x => x.NamedConnection == null && x.Schema == null);
+            set
+            {
+                if (value)
+                {
+                    this.CreateServices = new List<CreateCrudServices> { new() };
+                }
+                else
+                {
+                    this.CreateServices = this.CreateServices.Where(x => 
+                        x.NamedConnection == null && x.Schema == null).ToList();
+                }
+            }
+        }
         
         public Action<MetadataTypes, MetadataTypesConfig, IRequest> MetadataTypesFilter { get; set; }
         public Action<MetadataType, IRequest> TypeFilter { get; set; }
@@ -45,11 +78,13 @@ namespace ServiceStack
         
         public Func<MetadataType, bool> IncludeType { get; set; }
         public Func<MetadataOperationType, bool> IncludeService { get; set; }
+
+        public bool AddDataContractAttributes { get; set; } = true; //required by protobuf/gRPC
+        public bool AddIndexesToDataMembers { get; set; } = true;   //required by protobuf/gRPC
         
         public string AccessRole { get; set; } = RoleNames.Admin;
         
-        internal ConcurrentDictionary<Tuple<string,string>, DbSchema> CachedDbSchemas { get; } 
-            = new ConcurrentDictionary<Tuple<string,string>, DbSchema>();
+        internal ConcurrentDictionary<Tuple<string,string>, DbSchema> CachedDbSchemas { get; } = new();
 
         public Func<ColumnSchema, IOrmLiteDialectProvider, Type> ResolveColumnType { get; set; }
         
@@ -85,56 +120,36 @@ namespace ServiceStack
 
             return dataType;
         }
-        
-        string Localize(string s) => HostContext.AppHost?.ResolveLocalizedString(s, null) ?? s;
 
-        public Dictionary<Type, string[]> ServiceRoutes { get; set; }
-        
+        public Dictionary<Type, string[]> ServiceRoutes { get; set; } = new Dictionary<Type, string[]> {
+            { typeof(CrudCodeGenTypesService), new[]
+            {
+                "/" + "crud".Localize() + "/{Include}/{Lang}",
+            } },
+            { typeof(CrudTablesService), new[] {
+                "/" + "crud".Localize() + "/" + "tables".Localize(),
+                "/" + "crud".Localize() + "/" + "tables".Localize() + "/{Schema}",
+            } },
+        };
+
         private const string NoSchema = "__noschema";
 
         public GenerateCrudServices()
         {
-            ServiceRoutes = new Dictionary<Type, string[]> {
-                { typeof(CrudCodeGenTypesService), new[]
-                {
-                    "/" + Localize("crud") + "/{Include}/{Lang}",
-                } },
-                { typeof(CrudTablesService), new[] {
-                    "/" + Localize("crud") + "/" + Localize("tables"),
-                    "/" + Localize("crud") + "/" + Localize("tables") + "/{Schema}",
-                } },
-            };
             ResolveColumnType = DefaultResolveColumnType;
         }
 
         public void Register(IAppHost appHost)
         {
-            foreach (var registerService in ServiceRoutes)
+            if (AccessRole != null)
             {
-                appHost.RegisterService(registerService.Key, registerService.Value);
+                appHost.RegisterServices(ServiceRoutes);
             }
         }
 
         static string ResolveRequestType(Dictionary<string, MetadataType> existingTypesMap, MetadataOperationType op, CrudCodeGenTypes requestDto,
             out string modifier)
         {
-            Tuple<string, string> splitCrudOperation(string requestType)
-            {
-                if (requestType.StartsWith(AutoCrudOperation.Query))
-                    return new Tuple<string, string>(AutoCrudOperation.Query, requestType.Substring(AutoCrudOperation.Query.Length));
-                if (requestType.StartsWith(AutoCrudOperation.Create))
-                    return new Tuple<string, string>(AutoCrudOperation.Create, requestType.Substring(AutoCrudOperation.Create.Length));
-                if (requestType.StartsWith(AutoCrudOperation.Update))
-                    return new Tuple<string, string>(AutoCrudOperation.Update, requestType.Substring(AutoCrudOperation.Update.Length));
-                if (requestType.StartsWith(AutoCrudOperation.Patch))
-                    return new Tuple<string, string>(AutoCrudOperation.Patch, requestType.Substring(AutoCrudOperation.Patch.Length));
-                if (requestType.StartsWith(AutoCrudOperation.Delete))
-                    return new Tuple<string, string>(AutoCrudOperation.Delete, requestType.Substring(AutoCrudOperation.Delete.Length));
-                if (requestType.StartsWith(AutoCrudOperation.Save))
-                    return new Tuple<string, string>(AutoCrudOperation.Save, requestType.Substring(AutoCrudOperation.Save.Length));
-                throw new NotSupportedException($"Unknown Crud operation '{requestType}'");
-            }
-
             modifier = null;
             if (existingTypesMap.ContainsKey(op.Request.Name))
             {
@@ -142,17 +157,18 @@ namespace ServiceStack
                 if (requestDto.NamedConnection == null && requestDto.Schema == null)
                     return null;
                         
-                var crudOp = splitCrudOperation(op.Request.Name);
-                var newRequestName = crudOp.Item1 + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.NamedConnection ?? requestDto.Schema)) + crudOp.Item2;
+                var method = op.Request.Name.SplitPascalCase().LeftPart(' ');
+                var suffix = op.Request.Name.Substring(method.Length);
+                var newRequestName = method + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.NamedConnection ?? requestDto.Schema)) + suffix;
                 if (existingTypesMap.ContainsKey(newRequestName))
                 {
                     if (requestDto.NamedConnection == null || requestDto.Schema == null)
                         return null;
                             
-                    newRequestName = crudOp.Item1 + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.Schema)) + crudOp.Item2;
+                    newRequestName = method + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.Schema)) + suffix;
                     if (existingTypesMap.ContainsKey(newRequestName))
                     {
-                        newRequestName = crudOp.Item1 + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.NamedConnection + requestDto.Schema)) + crudOp.Item2;
+                        newRequestName = method + (modifier = StringUtils.SnakeCaseToPascalCase(requestDto.NamedConnection + requestDto.Schema)) + suffix;
                         if (existingTypesMap.ContainsKey(newRequestName))
                             return null;
                     }
@@ -165,10 +181,13 @@ namespace ServiceStack
         public List<Type> GenerateMissingServices(AutoQueryFeature feature)
         {
             var types = new List<Type>();
+            // return types;
 
             var assemblyName = new AssemblyName { Name = "tmpCrudAssembly" };
             var dynModule = AssemblyBuilder.DefineDynamicAssembly(assemblyName, AssemblyBuilderAccess.Run)
                 .DefineDynamicModule("tmpCrudModule");
+            
+            dynModule.SetCustomAttribute(CodegenAttrBuilder);
 
             var metadataTypes = GetMissingTypesToCreate(out var existingMetaTypesMap);
             var generatedTypes = new Dictionary<Tuple<string,string>, Type>();
@@ -204,13 +223,13 @@ namespace ServiceStack
             foreach (var metaType in metadataTypes)
             {
                 try 
-                { 
+                {
                     var newType = CreateOrGetType(dynModule, metaType, metadataTypes, existingMetaTypesMap, generatedTypes);
                     types.Add(newType);
                 }
-                catch (Exception e)
+                catch (Exception ex)
                 {
-                    Console.WriteLine(e);
+                    appHost.NotifyStartupException(ex);
                 }
             }
 
@@ -256,19 +275,34 @@ namespace ServiceStack
 
         private static readonly Dictionary<string, Type> ServiceStackModelTypes = new Dictionary<string, Type> {
             { nameof(UserAuth), typeof(UserAuth) },
-            { nameof(IUserAuth), typeof(IUserAuth) },
+            { nameof(IUserAuth), typeof(IUserAuth) },                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
             { nameof(UserAuthDetails), typeof(UserAuthDetails) },
             { nameof(IUserAuthDetails), typeof(IUserAuthDetails) },
+            { nameof(UserAuthRole), typeof(UserAuthRole) },
             { nameof(AuthUserSession), typeof(AuthUserSession) },
             { nameof(IAuthSession), typeof(IAuthSession) },
+            { nameof(CrudEvent), typeof(CrudEvent) },
+            { nameof(CacheEntry), typeof(CacheEntry) },
+            { nameof(ValidationRule), typeof(ValidationRule) },
+            { nameof(RequestLogEntry), typeof(RequestLogEntry) },
         };
-
+        
         private static Type ResolveType(string typeName, Dictionary<Tuple<string, string>, Type> generatedTypes)
         {
+            if (ServiceStackModelTypes.TryGetValue(typeName, out var ssType))
+                return ssType;
+
             foreach (var entry in generatedTypes)
             {
                 if (entry.Key.Item2 == typeName)
                     return entry.Value;
+            }
+
+            foreach (var asm in HostContext.AppHost.ServiceAssemblies)
+            {
+                var type = asm.GetTypes().FirstOrDefault(x => x.Name == typeName);
+                if (type != null)
+                    return type;
             }
             
             var ssInterfacesType = typeof(IQuery).Assembly.GetTypes().FirstOrDefault(x => x.Name == typeName);
@@ -279,14 +313,23 @@ namespace ServiceStack
             if (ssClientType != null)
                 return ssClientType;
             
-            if (ServiceStackModelTypes.TryGetValue(typeName, out var ssType))
-                return ssType;
-
             return HostContext.AppHost.ScriptContext.ProtectedMethods.@typeof(typeName);
+        }
+
+        private static Type AssertResolveType(string typeName, Dictionary<Tuple<string, string>, Type> generatedTypes)
+        {
+            var ret = ResolveType(typeName, generatedTypes);
+            if (ret == null)
+                ThrowCouldNotResolveType(typeName);
+            return ret;
         }
 
         private static Type ResolveType(Tuple<string,string> typeKey, Dictionary<Tuple<string, string>, Type> generatedTypes)
         {
+            var hasNs = typeKey.Item1 != null;
+            if (!hasNs)
+                return ResolveType(typeKey.Item2, generatedTypes);
+            
             if (generatedTypes.TryGetValue(typeKey, out var existingType))
                 return existingType;
 
@@ -306,8 +349,64 @@ namespace ServiceStack
             if (appType != null)
                 return appType;
 
-            return null;
+            return HostContext.AppHost.ScriptContext.ProtectedMethods.@typeof(fullTypeName);
         }
+
+        private static Type AssertResolveType(Tuple<string, string> typeKey, Dictionary<Tuple<string, string>, Type> generatedTypes)
+        {
+            var hasNs = typeKey.Item1 != null;
+            if (!hasNs)
+                return AssertResolveType(typeKey.Item2, generatedTypes);
+                
+            var ret = ResolveType(typeKey, generatedTypes);
+            if (ret == null)
+                ThrowCouldNotResolveType(typeKey.Item1 + '.' + typeKey.Item2);
+            return ret;
+        }
+
+        private static Dictionary<string, Type> attributesMap;
+        static Dictionary<string, Type> AttributesMap
+        {
+            get
+            {
+                if (attributesMap != null)
+                    return attributesMap;
+            
+                attributesMap = new Dictionary<string, Type>();
+
+                foreach (var type in typeof(RouteAttribute).Assembly.GetTypes())
+                {
+                    if (typeof(Attribute).IsAssignableFrom(type))
+                        attributesMap[StringUtils.RemoveSuffix(type.Name, "Attribute")] = type;
+                }
+
+                foreach (var type in typeof(AuthenticateAttribute).Assembly.GetTypes())
+                {
+                    if (typeof(Attribute).IsAssignableFrom(type))
+                        attributesMap[StringUtils.RemoveSuffix(type.Name, "Attribute")] = type;
+                }
+
+                return attributesMap;
+            }
+        }
+
+        private static readonly CustomAttributeBuilder CodegenAttrBuilder = new CustomAttributeBuilder(
+            typeof(System.CodeDom.Compiler.GeneratedCodeAttribute)
+                .GetConstructors().First(x => x.GetParameters().Length == 2),
+            new object[]{ "ServiceStack", Env.VersionString },
+            new PropertyInfo[0], TypeConstants.EmptyObjectArray);
+
+        private static readonly ConstructorInfo DataContractCtor = typeof(System.Runtime.Serialization.DataContractAttribute)
+            .GetConstructor(Type.EmptyTypes);
+        private static readonly ConstructorInfo DataMemberCtor = typeof(System.Runtime.Serialization.DataMemberAttribute)
+            .GetConstructor(Type.EmptyTypes);
+        private static readonly CustomAttributeBuilder DefaultDataContractCtorBuilder = new CustomAttributeBuilder(
+            DataContractCtor,
+            TypeConstants.EmptyObjectArray,
+            new PropertyInfo[0], TypeConstants.EmptyObjectArray);
+        private static readonly Attribute dataContractAttr = new DataContractAttribute();
+        private static readonly Attribute dataMemberAttr = new DataMemberAttribute();
+
 
         private static Type CreateOrGetType(ModuleBuilder dynModule, MetadataType metaType, 
             List<MetadataType> metadataTypes, Dictionary<Tuple<string, string>, MetadataType> existingMetaTypesMap, 
@@ -332,13 +431,258 @@ namespace ServiceStack
                 }
                 baseType = baseType.MakeGenericType(argTypes.ToArray());
             }
+
+            var interfaceTypes = new List<Type>();
+            var returnMarker = metaType.RequestType?.ReturnType;
+            if (returnMarker != null && returnMarker.Name != "QueryResponse`1")
+            {
+                var responseType = CreateOrGetType(dynModule, returnMarker, metadataTypes, existingMetaTypesMap, generatedTypes);
+                if (responseType == null)
+                    ThrowCouldNotResolveType(returnMarker.Name);
+                
+                interfaceTypes.Add(typeof(IReturn<>).MakeGenericType(responseType));
+            }
+            else if (metaType.RequestType?.ReturnsVoid == true)
+            {
+                interfaceTypes.Add(typeof(IReturnVoid));
+            }
+            
+            foreach (var metaIface in metaType.Implements.Safe())
+            {
+                var ifaceType = CreateOrGetType(dynModule, metaIface, metadataTypes, existingMetaTypesMap, generatedTypes);
+                if (ifaceType.IsGenericTypeDefinition)
+                {
+                    var argTypes = new List<Type>();
+                    foreach (var typeName in metaIface.GenericArgs.Safe())
+                    {
+                        var argType = CreateOrGetType(dynModule, typeName, metadataTypes, existingMetaTypesMap, generatedTypes);
+                        argTypes.Add(argType);
+                    }
+                    ifaceType = ifaceType.MakeGenericType(argTypes.ToArray());
+                }
+                interfaceTypes.Add(ifaceType);
+            }
             
             var typeBuilder = dynModule.DefineType(metaType.Namespace + "." + metaType.Name,
-                TypeAttributes.Public | TypeAttributes.Class, baseType);
+                TypeAttributes.Public | TypeAttributes.Class, baseType, interfaceTypes.ToArray());
+            typeBuilder.SetCustomAttribute(CodegenAttrBuilder);
+
+            List<MetadataPropertyType> toMetadataPropertyTypes(Dictionary<string, object> args)
+            {
+                var to = new List<MetadataPropertyType>();
+                foreach (var entry in args)
+                {
+                    if (entry.Value == null)
+                        continue;
+                    to.Add(new MetadataPropertyType { Name = entry.Key, Value = entry.Value.ConvertTo<string>(), Type = entry.Value.GetType().Name });
+                }
+                return to;
+            }
+            
+            if (metaType.DataContract != null)
+            {
+                var attrBuilder = metaType.DataContract.Name == null && metaType.DataContract.Namespace == null
+                    ? DefaultDataContractCtorBuilder
+                    : CreateCustomAttributeBuilder(new MetadataAttribute {
+                        Name = nameof(DataContractAttribute),
+                        Attribute = dataContractAttr,
+                        Args = toMetadataPropertyTypes(new Dictionary<string, object> {
+                            [nameof(DataContractAttribute.Name)] = metaType.DataContract.Name,
+                            [nameof(DataContractAttribute.Namespace)] = metaType.DataContract.Namespace,
+                        })
+                    }, generatedTypes);
+                typeBuilder.SetCustomAttribute(attrBuilder);
+            }
+             
+            foreach (var metaAttr in metaType.Attributes.Safe())
+            {
+                var attrBuilder = CreateCustomAttributeBuilder(metaAttr, generatedTypes);
+                typeBuilder.SetCustomAttribute(attrBuilder);
+            }
+
+            foreach (var metaProp in metaType.Properties.Safe())
+            {
+                var returnType = metaProp.PropertyType ??
+                    AssertResolveType(keyNs(metaProp.TypeNamespace, metaProp.Type), generatedTypes);
+                var propBuilder = typeBuilder.DefineProperty(metaProp.Name, PropertyAttributes.HasDefault,
+                    CallingConventions.Any, returnType, null);
+
+                if (metaProp.DataMember != null)
+                {
+                    var dm = metaProp.DataMember;
+                    var attrBuilder = CreateCustomAttributeBuilder(new MetadataAttribute {
+                        Name = nameof(DataMemberAttribute),
+                        Attribute = dataMemberAttr,
+                        Args = toMetadataPropertyTypes(new Dictionary<string, object> {
+                            [nameof(DataMemberAttribute.Name)] = dm.Name, 
+                            [nameof(DataMemberAttribute.Order)] = dm.Order, 
+                            [nameof(DataMemberAttribute.IsRequired)] = dm.IsRequired, 
+                            [nameof(DataMemberAttribute.EmitDefaultValue)] = dm.EmitDefaultValue, 
+                        })
+                    }, generatedTypes);
+                    propBuilder.SetCustomAttribute(attrBuilder);
+                }
+                
+                foreach (var metaAttr in metaProp.Attributes.Safe())
+                {
+                    var attrBuilder = CreateCustomAttributeBuilder(metaAttr, generatedTypes);
+                    propBuilder.SetCustomAttribute(attrBuilder);
+                }
+
+                CreatePublicPropertyBody(typeBuilder, propBuilder);
+            }
             
             var newType = typeBuilder.CreateTypeInfo().AsType();
             generatedTypes[key(newType)] = newType;
             return newType;
+        }
+        
+        private static void CreatePublicPropertyBody(TypeBuilder typeBuilder, PropertyBuilder propertyBuilder)
+        {
+            const MethodAttributes attributes = 
+                MethodAttributes.Public | 
+                MethodAttributes.HideBySig | 
+                MethodAttributes.SpecialName | 
+                MethodAttributes.Virtual |
+                MethodAttributes.Final;
+            
+            var fb = typeBuilder.DefineField("_" + propertyBuilder.Name.ToCamelCase(), propertyBuilder.PropertyType, FieldAttributes.Private);
+
+            var getterBuilder = typeBuilder.DefineMethod("get_" + propertyBuilder.Name, attributes, propertyBuilder.PropertyType, Type.EmptyTypes);
+
+            // Code generation
+            var ilgen = getterBuilder.GetILGenerator();
+
+            ilgen.Emit(OpCodes.Ldarg_0);
+            ilgen.Emit(OpCodes.Ldfld, fb); // returning the firstname field
+            ilgen.Emit(OpCodes.Ret);
+            
+            var setterBuilder = typeBuilder.DefineMethod("set_" + propertyBuilder.Name,
+                attributes, null, new[] { propertyBuilder.PropertyType });
+
+            ilgen = setterBuilder.GetILGenerator();
+
+            ilgen.Emit(OpCodes.Ldarg_0);
+            ilgen.Emit(OpCodes.Ldarg_1);
+            ilgen.Emit(OpCodes.Stfld, fb);
+            ilgen.Emit(OpCodes.Ret);
+
+            propertyBuilder.SetGetMethod(getterBuilder);
+            propertyBuilder.SetSetMethod(setterBuilder);
+        }
+
+        private static CustomAttributeBuilder CreateCustomAttributeBuilder(MetadataAttribute metaAttr,
+            Dictionary<Tuple<string, string>, Type> generatedTypes)
+        {
+            var attrType = metaAttr.Attribute?.GetType();
+            if (attrType == null && !AttributesMap.TryGetValue(metaAttr.Name, out attrType))
+                throw new NotSupportedException($"Could not resolve Attribute '{metaAttr.Name}'");
+
+            var args = new List<object>();
+            ConstructorInfo ciAttr;
+            var useCtorArgs = metaAttr.ConstructorArgs?.Count > 0; 
+            if (useCtorArgs)
+            {
+                var argCount = metaAttr.ConstructorArgs.Count;
+                ciAttr = attrType.GetConstructors().FirstOrDefault(ci => ci.GetParameters().Length == argCount)
+                         ?? throw new NotSupportedException(
+                             $"Could not resolve Attribute '{metaAttr.Name}' Constructor with {argCount} parameters");
+
+                foreach (var argType in metaAttr.ConstructorArgs)
+                {
+                    var ctorAttrType = ResolveType(argType.Type, generatedTypes);
+                    var argValue = argType.Value.ConvertTo(ctorAttrType);
+                    args.Add(argValue);
+                }
+                var attrBuilder = new CustomAttributeBuilder(ciAttr, args.ToArray());
+                return attrBuilder;
+            }
+            else
+            {
+                ciAttr = attrType.GetConstructors().FirstOrDefault(ci => ci.GetParameters().Length == 0)
+                         ?? throw new NotSupportedException($"Attribute '{metaAttr.Name}' does not have a default Constructor");
+                
+                var propInfos = new List<PropertyInfo>();
+                if (metaAttr.Args != null)
+                {
+                    foreach (var argType in metaAttr.Args)
+                    {
+                        propInfos.Add(attrType.GetProperty(argType.Name));
+                        var piAttrType = ResolveType(argType.Type, generatedTypes);
+                        var argValue = argType.Value.ConvertTo(piAttrType);
+                        args.Add(argValue);
+                    }
+                }
+
+                var attrBuilder = new CustomAttributeBuilder(ciAttr, TypeConstants.EmptyObjectArray, propInfos.ToArray(), args.ToArray());
+                return attrBuilder;
+            }
+        }
+
+        string ResolveModelType(MetadataOperationType op)
+        {
+            var baseGenericArg = op.Request.Inherits?.GenericArgs?.FirstOrDefault(); //e.g. QueryDb<From> or base class
+            if (baseGenericArg != null)
+                return baseGenericArg;
+
+            var interfaceArg = op.Request.Implements?.Where(x => x.GenericArgs?.Length > 0).FirstOrDefault()?.GenericArgs[0];
+            return interfaceArg;
+        }
+
+        void ReplaceModelType(MetadataTypes metadataTypes, string fromType, string toType)
+        {
+            foreach (var op in metadataTypes.Operations)
+            {
+                ReplaceModelType(op.Request, fromType, toType);
+                ReplaceModelType(op.Response, fromType, toType);
+            }
+            foreach (var metadataType in metadataTypes.Types)
+            {
+                ReplaceModelType(metadataType, fromType, toType);
+            }
+        }
+
+        void ReplaceModelType(MetadataType metadataType, string fromType, string toType)
+        {
+            if (metadataType == null)
+                return;
+
+            static void ReplaceGenericArgs(string[] genericArgs, string fromType, string toType)
+            {
+                if (genericArgs == null) 
+                    return;
+                
+                for (var i = 0; i < genericArgs.Length; i++)
+                {
+                    var arg = genericArgs[i];
+                    if (arg == fromType)
+                        genericArgs[i] = toType;
+                }
+            }
+
+            if (metadataType.Name == fromType)
+            {
+                //need to preserve DB Name if changing Type Name
+                var dbTableName = metadataType.Items != null && metadataType.Items.TryGetValue(nameof(TableSchema), out var oSchema)
+                        && oSchema is TableSchema schema
+                    ? schema.Name
+                    : metadataType.Name;
+                    
+                metadataType.AddAttributeIfNotExists(new AliasAttribute(dbTableName));
+                metadataType.Name = toType;
+            }
+            
+            if (metadataType.Inherits != null)
+            {
+                if (metadataType.Inherits.Name == fromType)
+                    metadataType.Inherits.Name = toType;
+                var genericArgs = metadataType.Inherits.GenericArgs;
+                ReplaceGenericArgs(genericArgs, fromType, toType);
+            }
+            foreach (var iface in metadataType.Implements.Safe())
+            {
+                ReplaceGenericArgs(iface.GenericArgs, fromType, toType);
+            }
         }
 
         internal List<MetadataType> GetMissingTypesToCreate(out Dictionary<Tuple<string, string>, MetadataType> typesMap)
@@ -360,19 +704,31 @@ namespace ServiceStack
                 requestDto.Include = "new";
                 
                 var req = new BasicRequest(requestDto);
-                var ret = ResolveMetadataTypes(requestDto, req);
+                var ret = ResolveMetadataTypes(requestDto, req, GenerateOperationsFilter);
+                
                 foreach (var op in ret.Item1.Operations)
                 {
-                    var newName = ResolveRequestType(existingTypesMap, op, requestDto, out var modifier);
-                    if (newName == null)
+                    var requestName = ResolveRequestType(existingTypesMap, op, requestDto, out var modifier);
+                    if (requestName == null)
                         continue;
-                    if (op.Request.Name != newName)
+                    if (op.Request.Name != requestName)
                     {
-                        op.Request.Name = newName;
-                        foreach (var route in op.Request.Routes.Safe())
+                        op.Request.Name = requestName;
+                        foreach (var route in op.Routes.Safe())
                         {
                             route.Path = ("/" + modifier + "/" + route.Path.Substring(1)).ToLower();
                         }
+
+                        var modelType = ResolveModelType(op);
+                        if (modelType != null)
+                        {
+                            ReplaceModelType(ret.Item1, modelType, modifier + modelType);
+                        }
+                    }
+
+                    foreach (var route in op.Routes.Safe())
+                    {
+                        op.Request.AddAttribute(new RouteAttribute(route.Path, route.Verbs));
                     }
 
                     addType(op.Request);
@@ -397,12 +753,13 @@ namespace ServiceStack
             return orderedTypes;
         }
 
-        public DbSchema GetCachedDbSchema(IDbConnectionFactory dbFactory, string schema=null, string namedConnection=null)
+        public DbSchema GetCachedDbSchema(IDbConnectionFactory dbFactory, string schema=null, string namedConnection=null,
+            List<string> includeTables = null, List<string> excludeTables = null)
         {
             var key = new Tuple<string, string>(schema ?? NoSchema, namedConnection);
             return CachedDbSchemas.GetOrAdd(key, k => {
 
-                var tables = GetTableSchemas(dbFactory, schema, namedConnection);
+                var tables = GetTableSchemas(dbFactory, schema, namedConnection, includeTables, excludeTables);
                 return new DbSchema {
                     Schema = schema,
                     NamedConnection = namedConnection,
@@ -411,39 +768,61 @@ namespace ServiceStack
             });
         }
 
-        public static List<TableSchema> GetTableSchemas(IDbConnectionFactory dbFactory, string schema=null, string namedConnection=null)
+        public static List<TableSchema> GetTableSchemas(IDbConnectionFactory dbFactory, string schema=null, string namedConnection=null,
+            List<string> includeTables = null, List<string> excludeTables = null)
         {
-            using var db = namedConnection != null
+            var db = namedConnection != null
                 ? dbFactory.OpenDbConnection(namedConnection)
                 : dbFactory.OpenDbConnection();
 
-            var tables = db.GetTableNames(schema);
-            var results = new List<TableSchema>();
-
-            var dialect = db.GetDialectProvider();
-            foreach (var table in tables)
+            try
             {
-                var to = new TableSchema {
-                    Name = table,
-                };
+                var tables = db.GetTableNames(schema);
+                var results = new List<TableSchema>();
 
-                try
+                var dialect = db.GetDialectProvider();
+                foreach (var table in tables)
                 {
-                    var quotedTable = dialect.GetQuotedTableName(table, schema);
-                    to.Columns = db.GetTableColumns($"SELECT * FROM {quotedTable}");
-                }
-                catch (Exception e)
-                {
-                    to.ErrorType = e.GetType().Name;
-                    to.ErrorMessage = e.Message;
+                    if (includeTables != null && !includeTables.Contains(table, StringComparer.OrdinalIgnoreCase))
+                        continue;
+                    if (excludeTables != null && excludeTables.Contains(table, StringComparer.OrdinalIgnoreCase))
+                        continue;
+                
+                    var to = new TableSchema {
+                        Name = table,
+                    };
+
+                    string quotedTable = null;
+                    try
+                    {
+                        quotedTable = dialect.GetQuotedTableName(table, schema);
+                        to.Columns = db.GetTableColumns($"SELECT * FROM {quotedTable}");
+                    }
+                    catch (Exception e)
+                    {
+                        to.ErrorType = e.GetType().Name;
+                        to.ErrorMessage = e.Message;
+                        log.Error($"GetTableSchemas(): Failed to GetTableColumns() for '{quotedTable}'", e);
+
+                        if (db.State != System.Data.ConnectionState.Open)
+                        {
+                            try { db.Dispose(); } catch {}
+                            db = namedConnection != null
+                                ? dbFactory.OpenDbConnection(namedConnection)
+                                : dbFactory.OpenDbConnection();
+                        }
+                    }
+
+                    results.Add(to);
                 }
 
-                results.Add(to);
+                return results;
             }
-
-            return results;
+            finally
+            {
+                db.Dispose();
+            }
         }
-
 
         public static string GenerateSourceCode(IRequest req, CrudCodeGenTypes request, 
             MetadataTypesConfig typesConfig, MetadataTypes crudMetadataTypes)
@@ -456,16 +835,19 @@ namespace ServiceStack
                 "typescript" => new TypeScriptGenerator(typesConfig).GetCode(crudMetadataTypes, req, metadata),
                 "dart" => new DartGenerator(typesConfig).GetCode(crudMetadataTypes, req, metadata),
                 "swift" => new SwiftGenerator(typesConfig).GetCode(crudMetadataTypes, req),
+                "swift4" => new Swift4Generator(typesConfig).GetCode(crudMetadataTypes, req),
                 "java" => new JavaGenerator(typesConfig).GetCode(crudMetadataTypes, req, metadata),
                 "kotlin" => new KotlinGenerator(typesConfig).GetCode(crudMetadataTypes, req, metadata),
                 "typescript.d" => new FSharpGenerator(typesConfig).GetCode(crudMetadataTypes, req),
+                _ => throw new NotSupportedException($"Unknown language '{request.Lang}', Supported languages: " +
+                                                     $"csharp, typescript, dart, swift, java, kotlin, vbnet, fsharp")
             };
             return src;
         }
 
-        public static string GenerateSource(IRequest req, CrudCodeGenTypes request)
+        public static string GenerateSource(IRequest req, CrudCodeGenTypes request, Action<AutoGenContext> generateOperationsFilter)
         {
-            var ret = ResolveMetadataTypes(request, req);
+            var ret = ResolveMetadataTypes(request, req, generateOperationsFilter);
             var crudMetadataTypes = ret.Item1;
             var typesConfig = ret.Item2;
             
@@ -483,39 +865,60 @@ namespace ServiceStack
             return src;
         }
 
-        static Tuple<string, string> key(Type type) => new Tuple<string, string>(type.Namespace, type.Name);
-        static Tuple<string, string> key(MetadataType type) => new Tuple<string, string>(type.Namespace, type.Name);
-        static Tuple<string, string> key(MetadataTypeName type) => new Tuple<string, string>(type.Namespace, type.Name);
-        static Tuple<string, string> keyNs(string ns, string name) => new Tuple<string, string>(ns, name);
+        static Tuple<string, string> key(Type type) => new(type.Namespace, type.Name);
+        static Tuple<string, string> key(MetadataType type) => new(type.Namespace, type.Name);
+        static Tuple<string, string> key(MetadataTypeName type) => new(type.Namespace, type.Name);
+        static Tuple<string, string> keyNs(string ns, string name) => new(ns, name);
 
-        public static Tuple<MetadataTypes, MetadataTypesConfig> ResolveMetadataTypes(CrudCodeGenTypes request, IRequest req)
+        public static Tuple<MetadataTypes, MetadataTypesConfig> ResolveMetadataTypes(
+            CrudCodeGenTypes request, IRequest req, Action<AutoGenContext> generateOperationsFilter)
         {
             if (string.IsNullOrEmpty(request.Include))
                 throw new ArgumentNullException(nameof(request.Include));
             if (request.Include != "all" && request.Include != "new")
                 throw new ArgumentException(
-                    "'Include' must be either 'all' to include all AutoQuery Services or 'new' to include only missing Services and Types", 
+                    @"'Include' must be either 'all' to include all AutoQuery Services or 'new' to include only missing Services and Types", 
                     nameof(request.Include));
             
             var metadata = req.Resolve<INativeTypesMetadata>();
-            var genServices = HostContext.AssertPlugin<AutoQueryFeature>().GenerateCrudServices;
+            IGenerateCrudServices genServices = HostContext.AssertPlugin<AutoQueryFeature>().GenerateCrudServices;
 
             var dbFactory = req.TryResolve<IDbConnectionFactory>();
             var results = request.NoCache == true 
-                ? GetTableSchemas(dbFactory, request.Schema, request.NamedConnection)
-                : genServices.GetCachedDbSchema(dbFactory, request.Schema, request.NamedConnection).Tables;
+                ? GetTableSchemas(dbFactory, request.Schema, request.NamedConnection, request.IncludeTables, request.ExcludeTables)
+                : genServices.GetCachedDbSchema(dbFactory, request.Schema, request.NamedConnection, request.IncludeTables, request.ExcludeTables).Tables;
 
             var appHost = HostContext.AppHost;
             request.BaseUrl ??= HostContext.GetPlugin<NativeTypesFeature>().MetadataTypesConfig.BaseUrl ?? appHost.GetBaseUrl(req);
-            if (request.MakePartial == null)
-                request.MakePartial = false;
-            if (request.MakeVirtual == null)
-                request.MakeVirtual = false;
-            if (request.InitializeCollections == null)
-                request.InitializeCollections = false;
-
             var typesConfig = metadata.GetConfig(request);
+            if (request.MakePartial == null)
+                typesConfig.MakePartial = false;
+            if (request.MakeVirtual == null)
+                typesConfig.MakeVirtual = false;
+            if (request.InitializeCollections == null)
+                typesConfig.InitializeCollections = false;
+            if (request.AddDataContractAttributes == null)
+                typesConfig.AddDataContractAttributes = genServices.AddDataContractAttributes;
+            if (request.AddIndexesToDataMembers == null)
+                typesConfig.AddIndexesToDataMembers = genServices.AddIndexesToDataMembers;
+            if (string.IsNullOrEmpty(request.AddDefaultXmlNamespace))
+                typesConfig.AddDefaultXmlNamespace = null;
+
             typesConfig.UsePath = req.PathInfo;
+            var exportDbAttrs = new[] {
+                typeof(NamedConnectionAttribute),
+                typeof(SchemaAttribute),
+                typeof(PrimaryKeyAttribute),
+                typeof(AutoIncrementAttribute),
+                typeof(AliasAttribute),
+                typeof(RequiredAttribute),
+            };
+            
+            if (typesConfig.ExportAttributes == null)
+                typesConfig.ExportAttributes = new HashSet<Type>(exportDbAttrs);
+            else
+                exportDbAttrs.Each(x => typesConfig.ExportAttributes.Add(x));
+            
             var metadataTypes = metadata.GetMetadataTypes(req, typesConfig);
             var serviceModelNs = appHost.GetType().Namespace + ".ServiceModel";
             var typesNs = serviceModelNs + ".Types";
@@ -555,14 +958,20 @@ namespace ServiceStack
             }
 
             var typesToGenerateMap = new Dictionary<string, TableSchema>();
+            var typesToGenerateSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var result in results)
             {
-                var keysCount = result.Columns.Count(x => x.IsKey);
+                var keysCount = result.Columns?.Count(x => x.IsKey) ?? 0;
                 if (keysCount != 1) // Only support tables with 1 PK
                     continue;
                 
                 typesToGenerateMap[result.Name] = result;
+                typesToGenerateSet.Add(StringUtils.SnakeCaseToPascalCase(result.Name));
             }
+
+            bool ContainsTypeToGenerate(string name) =>
+                typesToGenerateMap.ContainsKey(name) ||
+                typesToGenerateSet.Contains(StringUtils.SnakeCaseToPascalCase(name));
             
             var includeCrudServices = request.IncludeCrudOperations ?? genServices.IncludeCrudOperations;
             var includeCrudInterfaces = AutoCrudOperation.CrudInterfaceMetadataNames(includeCrudServices);
@@ -593,12 +1002,39 @@ namespace ServiceStack
             
             // Also don't include Types in App's Implementation Assemblies
             appHost.ServiceAssemblies.Each(x => appDlls.Add(x));
+            appDlls = appDlls.Where(x => !x.IsDynamic).Distinct().ToList();
             var existingAppTypes = new HashSet<string>();
             var existingExactAppTypes = new HashSet<Tuple<string,string>>();
+            var existingModelOperationTypes = new HashSet<Tuple<string,string>>();
+            
             foreach (var appType in appDlls.SelectMany(x => x.GetTypes()))
             {
                 existingAppTypes.Add(appType.Name);
                 existingExactAppTypes.Add(keyNs(appType.Namespace, appType.Name));
+                
+                if (appType.HasInterface(typeof(ICrud)))
+                {
+                    var autoQueryType = AutoCrudOperation.GetAutoQueryDtoType(appType);
+                    if (autoQueryType != null)
+                    {
+                        existingModelOperationTypes.Add(new Tuple<string, string>(
+                            autoQueryType.Value.ModelType.Name, autoQueryType.Value.Operation));
+                    }
+                }
+            }
+
+            bool ImplementsIncludedCrudInterface(MetadataType request)
+            {
+                if (request.Implements?.Any(x => includeCrudInterfaces.Contains(x.Name)) == true)
+                    return true;
+                if (includeCrudInterfaces.Contains("IQueryDb`1"))
+                {
+                    if (request.Inherits?.Name.StartsWith("QueryDb`") == true)
+                        return true;
+                    if (request.Type != null && request.Type.HasInterface(typeof(IQueryDb)))
+                        return true;
+                }
+                return false;
             }
 
             // Re-use existing Types with same name for default DB Connection
@@ -606,7 +1042,7 @@ namespace ServiceStack
             {
                 foreach (var op in metadataTypes.Operations)
                 {
-                    if (op.Request.Implements?.Any(x => includeCrudInterfaces.Contains(x.Name)) == true)
+                    if (ImplementsIncludedCrudInterface(op.Request))
                     {
                         operations.Add(op);
                     }
@@ -616,7 +1052,7 @@ namespace ServiceStack
                 }
                 foreach (var metaType in metadataTypes.Types)
                 {
-                    if (typesToGenerateMap.ContainsKey(metaType.Name))
+                    if (ContainsTypeToGenerate(metaType.Name))
                     {
                         types.Add(metaType);
                     }
@@ -628,7 +1064,7 @@ namespace ServiceStack
                 // Only re-use existing Types with exact Namespace + Name for NamedConnection Types
                 foreach (var op in metadataTypes.Operations)
                 {
-                    if (op.Request.Implements?.Any(x => includeCrudInterfaces.Contains(x.Name)) == true &&
+                    if (ImplementsIncludedCrudInterface(op.Request) &&
                         exactTypesLookup.ContainsKey(keyNs(serviceModelNs, op.Request.Name)))
                     {
                         operations.Add(op);
@@ -641,7 +1077,7 @@ namespace ServiceStack
                 }
                 foreach (var metaType in metadataTypes.Types)
                 {
-                    if (typesToGenerateMap.ContainsKey(metaType.Name) && 
+                    if (ContainsTypeToGenerate(metaType.Name) && 
                         exactTypesLookup.ContainsKey(keyNs(serviceModelNs, metaType.Name)))
                     {
                         types.Add(metaType);
@@ -670,29 +1106,39 @@ namespace ServiceStack
 
             List<MetadataPropertyType> toMetaProps(IEnumerable<ColumnSchema> columns, bool isModel=false)
             {
+                var i = 1;
                 var to = new List<MetadataPropertyType>();
                 foreach (var column in columns)
                 {
                     var dataType = genServices.ResolveColumnType(column, dialect);
                     if (dataType == null)
                         continue;
-                    
+
                     var isKey = column.IsKey || column.IsAutoIncrement;
 
-                    var prop = new MetadataPropertyType {
-                        PropertyType = dataType,
-                        Name = StringUtils.SnakeCaseToPascalCase(column.ColumnName),
-                        Type = dataType.GetMetadataPropertyType(),
-                        IsValueType = dataType.IsValueType ? true : (bool?) null,
-                        IsSystemType = dataType.IsSystemType() ? true : (bool?) null,
-                        IsEnum = dataType.IsEnum ? true : (bool?) null,
-                        TypeNamespace = dataType.Namespace,
-                    };
-                    
                     if (dataType.IsValueType && column.AllowDBNull && !isKey)
                     {
-                        prop.Type += "?";
+                        dataType = typeof(Nullable<>).MakeGenericType(dataType);
                     }
+
+                    var underlyingType = Nullable.GetUnderlyingType(dataType) ?? dataType;
+                    
+                    var prop = new MetadataPropertyType {
+                        PropertyType = dataType,
+                        Items = !isModel ? null : new Dictionary<string, object> {
+                            [nameof(ColumnSchema)] = column,
+                        },
+                        Name = StringUtils.SnakeCaseToPascalCase(column.ColumnName),
+                        Type = dataType.GetMetadataPropertyType(),
+                        IsValueType = underlyingType.IsValueType ? true : (bool?) null,
+                        IsSystemType = underlyingType.IsSystemType() ? true : (bool?) null,
+                        IsEnum = underlyingType.IsEnum ? true : (bool?) null,
+                        TypeNamespace = dataType.Namespace,
+                        GenericArgs = MetadataTypesGenerator.ToGenericArgs(dataType),
+                        DataMember = typesConfig.AddDataContractAttributes
+                            ? new MetadataDataMember { Order = i++ } 
+                            : null,
+                    };
                     
                     var attrs = new List<MetadataAttribute>();
                     if (isModel)
@@ -728,8 +1174,19 @@ namespace ServiceStack
 
             foreach (var entry in typesToGenerateMap)
             {
-                var typeName = StringUtils.SnakeCaseToPascalCase(entry.Key);
+                var genModelName = StringUtils.SnakeCaseToPascalCase(entry.Key);
+                var pluralGenModelName = Words.Pluralize(genModelName);
+                var ctx = new AutoGenContext(request, entry.Key, entry.Value) {
+                    DataModelName = genModelName,
+                    PluralDataModelName = pluralGenModelName,
+                    RoutePathBase = "/" + pluralGenModelName.ToLower(),
+                };
+                
+                generateOperationsFilter?.Invoke(ctx);
+
                 var tableSchema = entry.Value;
+                var dataModelName = ctx.DataModelName;
+                
                 if (includeCrudServices != null)
                 {
                     var pkField = tableSchema.Columns.First(x => x.IsKey);
@@ -739,21 +1196,27 @@ namespace ServiceStack
                         if (!AutoCrudOperation.IsOperation(operation))
                             continue;
 
-                        var requestType = operation + typeName;
+                        var modelOperation = new Tuple<string, string>(dataModelName, operation);
+                        if (existingModelOperationTypes.Contains(modelOperation))
+                            continue;
+                        existingModelOperationTypes.Add(modelOperation);
+
+                        var requestType = (ctx.OperationNames.TryGetValue(operation, out var customOpName) ? customOpName : null) 
+                          ?? (operation == AutoCrudOperation.Query 
+                              ? operation + ctx.PluralDataModelName
+                              : operation + dataModelName);
                         if (containsType(serviceModelNs, requestType))
                             continue;
 
                         var verb = crudVerbs[operation];
-                        var plural = Words.Pluralize(typeName).ToLower();
                         var route = verb == "GET" || verb == "POST"
-                            ? "/" + plural
-                            : "/" + plural + "/{" + id + "}";
+                            ? ctx.RoutePathBase
+                            : ctx.RoutePathBase + "/{" + id + "}";
                             
                         var op = new MetadataOperationType {
                             Actions = new List<string> { verb },
+                            Routes = new List<MetadataRoute> {},
                             Request = new MetadataType {
-                                Routes = new List<MetadataRoute> {
-                                },
                                 Name = requestType,
                                 Namespace = serviceModelNs,
                                 Implements = new [] { 
@@ -762,23 +1225,34 @@ namespace ServiceStack
                                     },
                                 },
                             },
+                            DataModel = new MetadataTypeName { Name = dataModelName },
                         };
+                        op.Request.RequestType = op;
+
+                        if (typesConfig.AddDataContractAttributes)
+                            op.Request.DataContract = new MetadataDataContract();
                         
                         if (!existingRoutes.Contains(new Tuple<string, string>(route, verb)))
-                            op.Request.Routes.Add(new MetadataRoute { Path = route, Verbs = verb });
+                            op.Routes.Add(new MetadataRoute { Path = route, Verbs = verb });
 
                         if (verb == HttpMethods.Get)
                         {
                             op.Request.Inherits = new MetadataTypeName {
                                 Namespace = "ServiceStack",
                                 Name = "QueryDb`1",
-                                GenericArgs = new[] {typeName},
+                                GenericArgs = new[] { dataModelName },
                             };
+                            op.ReturnType = new MetadataTypeName {
+                                Namespace = "ServiceStack",
+                                Name = "QueryResponse`1",
+                                GenericArgs = new[] { dataModelName },
+                            };
+                            op.ViewModel = new MetadataTypeName { Name = dataModelName };
                             
-                            var uniqueRoute = "/" + plural + "/{" + id + "}";
-                            if (!existingRoutes.Contains(new Tuple<string, string>(uniqueRoute, verb)))
+                            var uniqueRoute = ctx.RoutePathBase + "/{" + id + "}";
+                            if (!existingRoutes.Contains(new(uniqueRoute, verb)))
                             {
-                                op.Request.Routes.Add(new MetadataRoute {
+                                op.Routes.Add(new MetadataRoute {
                                     Path = uniqueRoute, 
                                     Verbs = verb
                                 });
@@ -787,16 +1261,21 @@ namespace ServiceStack
                         else
                         {
                             op.Request.Implements = new List<MetadataTypeName>(op.Request.Implements) {
-                                new MetadataTypeName {
+                                new() {
+                                    Namespace = "ServiceStack",
                                     Name = $"I{operation}Db`1",
                                     GenericArgs = new[] {
-                                        typeName,
+                                        dataModelName,
                                     }
                                 },
                             }.ToArray();
-                            op.Response = new MetadataType {
-                                Name = "IdResponse",
+                            op.ReturnType = new MetadataTypeName {
                                 Namespace = "ServiceStack",
+                                Name = "IdResponse",
+                            };
+                            op.Response = new MetadataType {
+                                Namespace = "ServiceStack",
+                                Name = "IdResponse",
                             };
                         }
 
@@ -810,6 +1289,9 @@ namespace ServiceStack
                                         Name = id,
                                         Type = pkField.DataType.Name + (pkField.DataType.IsValueType ? "?" : ""),
                                         TypeNamespace = pkField.DataType.Namespace, 
+                                        DataMember = typesConfig.AddDataContractAttributes
+                                            ? new MetadataDataMember { Order = 1 } 
+                                            : null, 
                                     }
                                 };
                                 break;
@@ -853,24 +1335,33 @@ namespace ServiceStack
                     }
                 }
 
-                if (!containsType(typesNs, typeName))
+                if (!containsType(typesNs, dataModelName))
                 {
                     var modelType = new MetadataType {
-                        Name = typeName,
+                        Name = dataModelName,
                         Namespace = typesNs,
                         Properties = toMetaProps(tableSchema.Columns, isModel:true),
+                        Items = new Dictionary<string, object> {
+                            [nameof(TableSchema)] = tableSchema,
+                        },
+                        DataContract = typesConfig.AddDataContractAttributes ? new MetadataDataContract() : null,
                     };
                     if (request.NamedConnection != null)
                         modelType.AddAttribute(new NamedConnectionAttribute(request.NamedConnection));
                     if (request.Schema != null)
                         modelType.AddAttribute(new SchemaAttribute(request.Schema));
-                    if (!string.Equals(dialect.NamingStrategy.GetTableName(typeName), tableSchema.Name, StringComparison.OrdinalIgnoreCase))
+                    if (!string.Equals(dialect.NamingStrategy.GetTableName(dataModelName), tableSchema.Name, StringComparison.OrdinalIgnoreCase))
                         modelType.AddAttribute(new AliasAttribute(tableSchema.Name));
                     crudMetadataTypes.Types.Add(modelType);
 
                     addToExistingTypes(typesNs, modelType);
                 }
             }
+
+            // Remove from metadata types where Existing Types exist
+            crudMetadataTypes.Types = crudMetadataTypes.Types
+                .Where(x => !existingExactAppTypes.Contains(new(x.Namespace, x.Name)))
+                .ToList();
 
             if (genServices.IncludeService != null)
             {
@@ -880,24 +1371,29 @@ namespace ServiceStack
             {
                 crudMetadataTypes.Types = crudMetadataTypes.Types.Where(genServices.IncludeType).ToList();
             }
-
+            
             if (genServices.ServiceFilter != null)
             {
                 foreach (var op in crudMetadataTypes.Operations)
                 {
+                    if (op.Request.Type != null) //existing service
+                        continue;
+                    
                     genServices.ServiceFilter(op, req);
                 }
             }
-
             if (genServices.TypeFilter != null)
             {
                 foreach (var type in crudMetadataTypes.Types)
                 {
+                    if (type.Type != null) //existing service
+                        continue;
+                    
                     genServices.TypeFilter(type, req);
                 }
             }
-            
             genServices.MetadataTypesFilter?.Invoke(crudMetadataTypes, typesConfig, req);
+
             
             return new Tuple<MetadataTypes, MetadataTypesConfig>(crudMetadataTypes, typesConfig);
         }
@@ -909,14 +1405,14 @@ namespace ServiceStack
     public class CrudCodeGenTypesService : Service
     {
         [AddHeader(ContentType = MimeTypes.PlainText)]
-        public object Any(CrudCodeGenTypes request)
+        public async Task<object> Any(CrudCodeGenTypes request)
         {
             try
             {
                 var genServices = HostContext.AssertPlugin<AutoQueryFeature>().GenerateCrudServices;
-                RequestUtils.AssertIsAdminOrDebugMode(base.Request, adminRole: genServices.AccessRole, authSecret: request.AuthSecret);
+                await RequestUtils.AssertAccessRoleOrDebugModeAsync(base.Request, accessRole: genServices.AccessRole, authSecret: request.AuthSecret);
                 
-                var src = GenerateCrudServices.GenerateSource(Request, request);
+                var src = GenerateCrudServices.GenerateSource(Request, request, genServices.GenerateOperationsFilter);
                 return src;
             }
             catch (Exception e)
@@ -928,27 +1424,27 @@ namespace ServiceStack
         }
     }
     
-    public class GetMissingTypesToCreate {}
-
     [Restrict(VisibilityTo = RequestAttributes.None)]
     [DefaultRequest(typeof(CrudTables))]
     public class CrudTablesService : Service
     {
-        public object Any(CrudTables request)
+        public async Task<object> Any(CrudTables request)
         {
             var genServices = HostContext.AssertPlugin<AutoQueryFeature>().GenerateCrudServices;
-            RequestUtils.AssertIsAdminOrDebugMode(Request, adminRole: genServices.AccessRole, authSecret: request.AuthSecret);
+            await RequestUtils.AssertAccessRoleOrDebugModeAsync(Request, accessRole: genServices.AccessRole, authSecret: request.AuthSecret);
             
             var dbFactory = TryResolve<IDbConnectionFactory>();
             var results = request.NoCache == true 
-                ? GenerateCrudServices.GetTableSchemas(dbFactory, request.Schema, request.NamedConnection)
-                : genServices.GetCachedDbSchema(dbFactory, request.Schema, request.NamedConnection).Tables;
+                ? GenerateCrudServices.GetTableSchemas(dbFactory, request.Schema, request.NamedConnection, request.IncludeTables, request.ExcludeTables)
+                : genServices.GetCachedDbSchema(dbFactory, request.Schema, request.NamedConnection, request.IncludeTables, request.ExcludeTables).Tables;
 
             return new AutoCodeSchemaResponse {
                 Results = results,
             };
         }
 #if DEBUG
+        public class GetMissingTypesToCreate {}
+
         public object Any(GetMissingTypesToCreate request) => ((GenerateCrudServices) HostContext
             .AssertPlugin<AutoQueryFeature>()
             .GenerateCrudServices).GetMissingTypesToCreate(out _);

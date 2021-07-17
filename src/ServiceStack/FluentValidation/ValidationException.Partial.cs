@@ -29,14 +29,14 @@ namespace ServiceStack.FluentValidation {
 	/// <summary>
 	/// An exception that represents failed validation
 	/// </summary>
-	public partial class ValidationException : ArgumentException, IResponseStatusConvertible
+	public partial class ValidationException : IResponseStatusConvertible
 	{
 	    public ResponseStatus ToResponseStatus()
 	    {
 	        var errors = Errors.Map(x =>
 	            new ValidationErrorField(x.ErrorCode, x.PropertyName, x.ErrorMessage)
 	            {
-	                Meta = x.CustomState as Dictionary<string, string> ?? x.FormattedMessagePlaceholderValues.ToStringDictionary()
+	                Meta = x.CustomStateAsDictionary()
 	            });
 
 	        var responseStatus = ResponseStatusUtils.CreateResponseStatus(typeof(ValidationException).GetOperationName(), Message, errors);

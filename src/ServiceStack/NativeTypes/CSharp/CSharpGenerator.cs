@@ -22,10 +22,12 @@ namespace ServiceStack.NativeTypes.CSharp
         }
         
         public static Action<StringBuilderWrapper, MetadataType> PreTypeFilter { get; set; }
+        public static Action<StringBuilderWrapper, MetadataType> InnerTypeFilter { get; set; }
         public static Action<StringBuilderWrapper, MetadataType> PostTypeFilter { get; set; }
+        public static Action<StringBuilderWrapper, MetadataPropertyType, MetadataType> PrePropertyFilter { get; set; }
+        public static Action<StringBuilderWrapper, MetadataPropertyType, MetadataType> PostPropertyFilter { get; set; }
 
-        public static Dictionary<string, string> TypeAliases = new Dictionary<string, string> 
-        {
+        public static Dictionary<string, string> TypeAliases = new() {
             { "String", "string" },    
             { "Boolean", "bool" },    
             { "Byte", "byte" },    
@@ -37,10 +39,29 @@ namespace ServiceStack.NativeTypes.CSharp
             { "UInt64", "ulong" },    
             { "Single", "float" },    
             { "Double", "double" },    
-            { "Decimal", "decimal" },    
+            { "Decimal", "decimal" },
         };
 
         public static TypeFilterDelegate TypeFilter { get; set; }
+
+        public static Func<CSharpGenerator, MetadataType, MetadataPropertyType, string> PropertyTypeFilter { get; set; }
+
+        /// <summary>
+        /// Helper to make Nullable Reference Type Annotations
+        /// </summary>
+        public static bool UseNullableAnnotations
+        {
+            set
+            {
+                if (value)
+                {
+                    PropertyTypeFilter = (gen, type, prop) => 
+                        prop.IsRequired == true || prop.PropertyInfo?.PropertyType.IsValueType == true
+                            ? gen.GetPropertyType(prop)
+                            : gen.GetPropertyType(prop).EnsureSuffix('?');
+                }
+            }
+        }
 
         public static Func<List<MetadataType>, List<MetadataType>> FilterTypes = DefaultFilterTypes;
 
@@ -135,12 +156,12 @@ namespace ServiceStack.NativeTypes.CSharp
 
             var existingTypes = new HashSet<string>();
 
-            var requestTypes = metadata.Operations.Select(x => x.Request).ToHashSet();
+            var requestTypes = metadata.Operations.Select(x => x.Request).ToSet();
             var requestTypesMap = metadata.Operations.ToSafeDictionary(x => x.Request);
             var responseTypes = metadata.Operations
                 .Where(x => x.Response != null)
-                .Select(x => x.Response).ToHashSet();
-            var types = metadata.Types.ToHashSet();
+                .Select(x => x.Response).ToSet();
+            var types = metadata.Types.ToSet();
 
             allTypes = new List<MetadataType>();
             allTypes.AddRange(requestTypes);
@@ -174,22 +195,24 @@ namespace ServiceStack.NativeTypes.CSharp
                         lastNS = AppendType(ref sb, type, lastNS, allTypes, 
                             new CreateTypeOptions
                             {
+                                Routes = metadata.Operations.GetRoutes(type),
                                 ImplementsFn = () =>
                                     {
                                         if (!Config.AddReturnMarker
-                                            && !type.ReturnVoidMarker
-                                            && type.ReturnMarkerTypeName == null)
+                                            && operation?.ReturnsVoid != true
+                                            && operation?.ReturnType == null)
                                             return null;
 
-                                        if (type.ReturnVoidMarker)
-                                            return "IReturnVoid";
-                                        if (type.ReturnMarkerTypeName != null)
-                                            return Type("IReturn`1", new[] { Type(type.ReturnMarkerTypeName) });
+                                        if (operation?.ReturnsVoid == true)
+                                            return nameof(IReturnVoid);
+                                        if (operation?.ReturnType != null)
+                                            return Type("IReturn`1", new[] { Type(operation.ReturnType) });
                                         return response != null
                                             ? Type("IReturn`1", new[] { Type(response.Name, response.GenericArgs) })
                                             : null;
                                     },
                                 IsRequest = true,
+                                Op = operation,
                             });
 
                         existingTypes.Add(fullTypeName);
@@ -251,9 +274,9 @@ namespace ServiceStack.NativeTypes.CSharp
 
             sb.AppendLine();
             AppendComments(sb, type.Description);
-            if (type.Routes != null)
+            if (options?.Routes != null)
             {
-                AppendAttributes(sb, type.Routes.ConvertAll(x => x.ToMetadataAttribute()));
+                AppendAttributes(sb, options.Routes.ConvertAll(x => x.ToMetadataAttribute()));
             }
             AppendAttributes(sb, type.Attributes);
             AppendDataContract(sb, type.DataContract);
@@ -262,6 +285,7 @@ namespace ServiceStack.NativeTypes.CSharp
 
             var typeAccessor = !Config.MakeInternal ? "public" : "internal";
 
+            sb.Emit(type, Lang.CSharp);
             PreTypeFilter?.Invoke(sb, type);
 
             if (type.IsEnum.GetValueOrDefault())
@@ -284,7 +308,7 @@ namespace ServiceStack.NativeTypes.CSharp
                                 new MetadataAttribute {
                                     Name = "EnumMember",
                                     Args = new List<MetadataPropertyType> {
-                                        new MetadataPropertyType {
+                                        new() {
                                             Name = "Value",
                                             Value = memberValue,
                                             Type = "String",
@@ -331,12 +355,14 @@ namespace ServiceStack.NativeTypes.CSharp
                     sb.AppendLine($"    : {string.Join(", ", inheritsList.ToArray())}");
 
                 sb.AppendLine("{");
+
                 sb = sb.Indent();
+                InnerTypeFilter?.Invoke(sb, type);
 
                 AddConstructor(sb, type, options);
                 AddProperties(sb, type,
                     includeResponseStatus: Config.AddResponseStatus && options.IsResponse
-                        && type.Properties.Safe().All(x => x.Name != typeof(ResponseStatus).Name));
+                        && type.Properties.Safe().All(x => x.Name != nameof(ResponseStatus)));
 
                 foreach (var innerTypeRef in type.InnerTypes.Safe())
                 {
@@ -395,7 +421,7 @@ namespace ServiceStack.NativeTypes.CSharp
 
             foreach (var prop in collectionProps)
             {
-                sb.AppendLine($"{prop.Name.SafeToken()} = new {Type(prop.GetTypeName(Config, allTypes), prop.GenericArgs,includeNested:true)}{{}};");
+                sb.AppendLine($"{GetPropertyName(prop.Name)} = new {Type(prop.GetTypeName(Config, allTypes), prop.GenericArgs,includeNested:true)}{{}};");
             }
 
             sb = sb.UnIndent();
@@ -417,12 +443,18 @@ namespace ServiceStack.NativeTypes.CSharp
                 {
                     if (wasAdded) sb.AppendLine();
 
-                    var propType = Type(prop.GetTypeName(Config, allTypes), prop.GenericArgs, includeNested:true);
+                    var propType = GetPropertyType(prop);
+                    propType = PropertyTypeFilter?.Invoke(this, type, prop) ?? propType;
+
                     wasAdded = AppendComments(sb, prop.Description);
                     wasAdded = AppendDataMember(sb, prop.DataMember, dataMemberIndex++) || wasAdded;
                     wasAdded = AppendAttributes(sb, prop.Attributes) || wasAdded;
                     var visibility = type.IsInterface() ? "" : "public ";
-                    sb.AppendLine($"{visibility}{virt}{propType} {prop.Name.SafeToken()} {{ get; set; }}");
+                    
+                    sb.Emit(prop, Lang.CSharp);
+                    PrePropertyFilter?.Invoke(sb, prop, type);
+                    sb.AppendLine($"{visibility}{virt}{propType} {GetPropertyName(prop.Name)} {{ get; set; }}");
+                    PostPropertyFilter?.Invoke(sb, prop, type);
                 }
             }
 
@@ -448,7 +480,13 @@ namespace ServiceStack.NativeTypes.CSharp
                 sb.AppendLine($"public {virt}ExtensionDataObject ExtensionData {{ get; set; }}");
             }
         }
-        
+
+        public virtual string GetPropertyType(MetadataPropertyType prop)
+        {
+            var propType = Type(prop.GetTypeName(Config, allTypes), prop.GenericArgs, includeNested: true);
+            return propType;
+        }
+
         public static Dictionary<string,string[]> AttributeConstructorArgs { get; set; } = new Dictionary<string, string[]> {
             ["ValidateRequest"] = new[] { nameof(ValidateRequestAttribute.Validator) },
             ["Validate"] = new[] { nameof(ValidateRequestAttribute.Validator) },
@@ -463,7 +501,7 @@ namespace ServiceStack.NativeTypes.CSharp
                 if ((attr.Args == null || attr.Args.Count == 0)
                     && (attr.ConstructorArgs == null || attr.ConstructorArgs.Count == 0))
                 {
-                    sb.AppendLine($"[{attr.Name}]");
+                    sb.AppendLine($"[{GetPropertyName(attr.Name)}]");
                 }
                 else
                 {
@@ -502,6 +540,20 @@ namespace ServiceStack.NativeTypes.CSharp
         public string TypeValue(string type, string value)
         {
             var alias = TypeAlias(type);
+            if (type == nameof(Int32))
+            {
+                if (value == int.MinValue.ToString())
+                    return "int.MinValue";
+                if (value == int.MaxValue.ToString())
+                    return "int.MaxValue";
+            }
+            if (type == nameof(Int64))
+            {
+                if (value == long.MinValue.ToString())
+                    return "long.MinValue";
+                if (value == long.MaxValue.ToString())
+                    return "long.MaxValue";
+            }
             if (value == null)
                 return "null";
             if (alias == "string")
@@ -667,6 +719,8 @@ namespace ServiceStack.NativeTypes.CSharp
 
             return true;
         }
+
+        public string GetPropertyName(string name) => name.SafeToken();
     }
 
     public static class CSharpGeneratorExtensions

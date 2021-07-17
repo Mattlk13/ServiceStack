@@ -1,8 +1,9 @@
 ﻿using System;
 using System.Linq;
-using System.Collections.Generic;
 using System.Globalization;
+using System.Threading.Tasks;
 using ServiceStack.FluentValidation;
+using ServiceStack.Text;
 using ServiceStack.Validation;
 using ServiceStack.Web;
 
@@ -30,24 +31,32 @@ namespace ServiceStack.Auth
                     RuleFor(x => x.UserName).NotEmpty().When(x => x.Email.IsNullOrEmpty());
                     RuleFor(x => x.Email).NotEmpty().EmailAddress().When(x => x.UserName.IsNullOrEmpty());
                     RuleFor(x => x.UserName)
-                        .Must(x =>
+                        .MustAsync(async (x,token) =>
                         {
-                            var authRepo = HostContext.AppHost.GetAuthRepository(base.Request);
+                            var authRepo = HostContext.AppHost.GetAuthRepositoryAsync(base.Request);
+#if NET472 || NETSTANDARD2_0
+                            await using (authRepo as IAsyncDisposable)
+#else
                             using (authRepo as IDisposable)
+#endif
                             {
-                                return authRepo.GetUserAuthByUserName(x) == null;
+                                return await authRepo.GetUserAuthByUserNameAsync(x).ConfigAwait() == null;
                             }
                         })
                         .WithErrorCode("AlreadyExists")
                         .WithMessage(ErrorMessages.UsernameAlreadyExists.Localize(base.Request))
                         .When(x => !x.UserName.IsNullOrEmpty());
                     RuleFor(x => x.Email)
-                        .Must(x =>
+                        .MustAsync(async (x,token) =>
                         {
-                            var authRepo = HostContext.AppHost.GetAuthRepository(base.Request);
+                            var authRepo = HostContext.AppHost.GetAuthRepositoryAsync(base.Request);
+#if NET472 || NETSTANDARD2_0
+                            await using (authRepo as IAsyncDisposable)
+#else
                             using (authRepo as IDisposable)
+#endif
                             {
-                                return x.IsNullOrEmpty() || authRepo.GetUserAuthByUserName(x) == null;
+                                return x.IsNullOrEmpty() || await authRepo.GetUserAuthByUserNameAsync(x).ConfigAwait() == null;
                             }
                         })
                         .WithErrorCode("AlreadyExists")
@@ -79,22 +88,41 @@ namespace ServiceStack.Auth
         /// <summary>
         /// Update an existing registration
         /// </summary>
-        public object Put(Register request)
+        [Obsolete("Use PostAsync")]
+        public Task<object> PutAsync(Register request)
         {
-            return Post(request);
+            return PostAsync(request);
         }
 
         /// <summary>
-        ///     Create new Registration
+        /// Create new Registration
         /// </summary>
+        [Obsolete("Use PostAsync")]
         public object Post(Register request)
+        {
+            try
+            {
+                var task = PostAsync(request);
+                var response = task.GetResult();
+                return response;
+            }
+            catch (Exception e)
+            {
+                throw e.UnwrapIfSingleException();
+            }
+        }
+        
+        /// <summary>
+        /// Create new Registration
+        /// </summary>
+        public async Task<object> PostAsync(Register request)
         {
             var returnUrl = Request.GetReturnUrl();
 
             var authFeature = GetPlugin<AuthFeature>();
             if (authFeature != null)
             {
-                if (authFeature.SaveUserNamesInLowerCase == true)
+                if (authFeature.SaveUserNamesInLowerCase)
                 {
                     if (request.UserName != null)
                         request.UserName = request.UserName.ToLower();
@@ -110,55 +138,66 @@ namespace ServiceStack.Auth
                 return validateResponse;
 
             RegisterResponse response = null;
-            var session = this.GetSession();
-            var newUserAuth = ToUserAuth(AuthRepository, request);
+            var session = await this.GetSessionAsync().ConfigAwait();
+            var newUserAuth = ToUserAuth(AuthRepositoryAsync as ICustomUserAuth, request);
 
-            var existingUser = session.IsAuthenticated ? AuthRepository.GetUserAuth(session, null) : null;
+            var existingUser = session.IsAuthenticated 
+                ? await AuthRepositoryAsync.GetUserAuthAsync(session, null).ConfigAwait() 
+                : null;
             var registerNewUser = existingUser == null;
 
             if (!registerNewUser && !AllowUpdates)
                 throw new NotSupportedException(ErrorMessages.RegisterUpdatesDisabled.Localize(Request));
-            
-            if (!HostContext.AppHost.GlobalRequestFiltersAsync.Contains(ValidationFilters.RequestFilterAsync)) //Already gets run
-                RegistrationValidator?.ValidateAndThrow(request, registerNewUser ? ApplyTo.Post : ApplyTo.Put);
+
+            if (!HostContext.AppHost.GlobalRequestFiltersAsync.Contains(ValidationFilters.RequestFilterAsync) //Already gets run
+                && RegistrationValidator != null)
+            {
+                await RegistrationValidator.ValidateAndThrowAsync(request, registerNewUser ? ApplyTo.Post : ApplyTo.Put).ConfigAwait();
+            }
             
             var user = registerNewUser
-                ? AuthRepository.CreateUserAuth(newUserAuth, request.Password)
-                : AuthRepository.UpdateUserAuth(existingUser, newUserAuth, request.Password);
+                ? await AuthRepositoryAsync.CreateUserAuthAsync(newUserAuth, request.Password).ConfigAwait()
+                : await AuthRepositoryAsync.UpdateUserAuthAsync(existingUser, newUserAuth, request.Password).ConfigAwait();
 
             if (registerNewUser)
             {
                 session.PopulateSession(user);
                 session.OnRegistered(Request, session, this);
+                if (session is IAuthSessionExtended sessionExt)
+                    await sessionExt.OnRegisteredAsync(Request, session, this).ConfigAwait();
                 AuthEvents?.OnRegistered(this.Request, session, this);
+                if (AuthEvents is IAuthEventsAsync asyncEvents)
+                    await asyncEvents.OnRegisteredAsync(this.Request, session, this).ConfigAwait();
             }
 
             if (request.AutoLogin.GetValueOrDefault())
             {
-                using (var authService = base.ResolveService<AuthenticateService>())
+#if NETSTANDARD2_0 || NET472
+                await using var authService = base.ResolveService<AuthenticateService>();
+#else
+                using var authService = base.ResolveService<AuthenticateService>();
+#endif                
+                var authResponse = await authService.PostAsync(
+                    new Authenticate {
+                        provider = CredentialsAuthProvider.Name,
+                        UserName = request.UserName ?? request.Email,
+                        Password = request.Password,
+                    });
+
+                if (authResponse is IHttpError)
+                    throw (Exception)authResponse;
+
+                if (authResponse is AuthenticateResponse typedResponse)
                 {
-                    var authResponse = authService.Post(
-                        new Authenticate {
-                            provider = CredentialsAuthProvider.Name,
-                            UserName = request.UserName ?? request.Email,
-                            Password = request.Password,
-                        });
-
-                    if (authResponse is IHttpError)
-                        throw (Exception)authResponse;
-
-                    if (authResponse is AuthenticateResponse typedResponse)
+                    response = new RegisterResponse
                     {
-                        response = new RegisterResponse
-                        {
-                            SessionId = typedResponse.SessionId,
-                            UserName = typedResponse.UserName,
-                            ReferrerUrl = typedResponse.ReferrerUrl,
-                            UserId = user.Id.ToString(CultureInfo.InvariantCulture),
-                            BearerToken = typedResponse.BearerToken,
-                            RefreshToken = typedResponse.RefreshToken,
-                        };
-                    }
+                        SessionId = typedResponse.SessionId,
+                        UserName = typedResponse.UserName,
+                        ReferrerUrl = typedResponse.ReferrerUrl,
+                        UserId = user.Id.ToString(CultureInfo.InvariantCulture),
+                        BearerToken = typedResponse.BearerToken,
+                        RefreshToken = typedResponse.RefreshToken,
+                    };
                 }
             }
 
@@ -187,9 +226,9 @@ namespace ServiceStack.Auth
             return response;
         }
 
-        public IUserAuth ToUserAuth(IAuthRepository authRepo, Register request)
+        public static IUserAuth ToUserAuth(ICustomUserAuth customUserAuth, Register request)
         {
-            var to = authRepo is ICustomUserAuth customUserAuth
+            var to = customUserAuth != null
                 ? customUserAuth.CreateUserAuth()
                 : new UserAuth();
 
@@ -221,8 +260,45 @@ namespace ServiceStack.Auth
                 if (existingUser == null)
                     throw HttpError.NotFound(ErrorMessages.UserNotExists.Localize(Request));
 
-                var newUserAuth = ToUserAuth(authRepo, request);
+                var newUserAuth = ToUserAuth(authRepo as ICustomUserAuth, request);
                 authRepo.UpdateUserAuth(existingUser, newUserAuth, request.Password);
+
+                return new RegisterResponse
+                {
+                    UserId = existingUser.Id.ToString(CultureInfo.InvariantCulture),
+                };
+            }
+        }
+
+        /// <summary>
+        /// Logic to update UserAuth from Registration info, not enabled on PUT because of security.
+        /// </summary>
+        public async Task<object> UpdateUserAuthAsync(Register request)
+        {
+            if (!HostContext.AppHost.GlobalRequestFiltersAsyncArray.Contains(ValidationFilters.RequestFilterAsync)) //Already gets run
+            {
+                await RegistrationValidator.ValidateAndThrowAsync(request, ApplyTo.Put).ConfigAwait();
+            }
+
+            var response = ValidateFn?.Invoke(this, HttpMethods.Put, request);
+            if (response != null)
+                return response;
+
+            var session = await this.GetSessionAsync().ConfigAwait();
+
+            var authRepo = HostContext.AppHost.GetAuthRepositoryAsync(base.Request);
+#if NET472 || NETSTANDARD2_0
+            await using (authRepo as IAsyncDisposable)
+#else
+            using (authRepo as IDisposable)
+#endif
+            {
+                var existingUser = await authRepo.GetUserAuthAsync(session, null).ConfigAwait();
+                if (existingUser == null)
+                    throw HttpError.NotFound(ErrorMessages.UserNotExists.Localize(Request));
+
+                var newUserAuth = ToUserAuth(authRepo as ICustomUserAuth, request);
+                await authRepo.UpdateUserAuthAsync(existingUser, newUserAuth, request.Password).ConfigAwait();
 
                 return new RegisterResponse
                 {

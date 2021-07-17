@@ -2,9 +2,11 @@
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
 using ServiceStack.Auth;
 using ServiceStack.Host;
+using ServiceStack.Text;
 using ServiceStack.Web;
 
 namespace ServiceStack
@@ -63,28 +65,29 @@ namespace ServiceStack
             var authProviders = AuthenticateService.GetAuthProviders(this.Provider);
             if (authProviders.Length == 0)
             {
-                await res.WriteError(req, requestDto, $"No registered Auth Providers found matching {this.Provider ?? "any"} provider");
+                await res.WriteError(req, requestDto, $"No registered Auth Providers found matching {this.Provider ?? "any"} provider").ConfigAwait();
                 res.EndRequest();
                 return;
             }
             
             req.PopulateFromRequestIfHasSessionId(requestDto);
 
-            await PreAuthenticateAsync(req, authProviders);
+            await PreAuthenticateAsync(req, authProviders).ConfigAwait();
 
             if (res.IsClosed)
                 return;
 
-            var session = req.GetSession();
+            var session = await req.GetSessionAsync().ConfigAwait();
             if (session == null || !authProviders.Any(x => session.IsAuthorized(x.Provider)))
             {
                 if (this.DoHtmlRedirectIfConfigured(req, res, true))
                     return;
 
-                await AuthProvider.HandleFailedAuth(authProviders[0], session, req, res);
+                await AuthProvider.HandleFailedAuth(authProviders[0], session, req, res).ConfigAwait();
             }
         }
 
+        [Obsolete("Use AuthenticateAsync")]
         public static bool Authenticate(IRequest req, object requestDto=null, IAuthSession session=null, IAuthProvider[] authProviders=null)
         {
             if (HostContext.HasValidAuthSecret(req))
@@ -105,32 +108,96 @@ namespace ServiceStack
                 req.Items[Keywords.HasPreAuthenticated] = true;
                 foreach (var authWithRequest in authProviders.OfType<IAuthWithRequest>())
                 {
+                    authWithRequest.PreAuthenticateAsync(req, mockResponse).Wait();
+                    if (mockResponse.IsClosed)
+                        return false;
+                }
+                foreach (var authWithRequest in authProviders.OfType<IAuthWithRequestSync>())
+                {
                     authWithRequest.PreAuthenticate(req, mockResponse);
                     if (mockResponse.IsClosed)
                         return false;
                 }
             }
             
-            return session != null && (authProviders.Length > 0 
-                       ? authProviders.Any(x => session.IsAuthorized(x.Provider))
-                       : session.IsAuthenticated);
+            return session != null && (authProviders.Length > 0
+                ? authProviders.Any(x => session.IsAuthorized(x.Provider))
+                : session.IsAuthenticated);
         }
 
+        public static async Task<bool> AuthenticateAsync(IRequest req, object requestDto=null, IAuthSession session=null, IAuthProvider[] authProviders=null)
+        {
+            if (HostContext.HasValidAuthSecret(req))
+                return true;
+
+            session ??= await (req ?? throw new ArgumentNullException(nameof(req))).GetSessionAsync().ConfigAwait();
+            authProviders ??= AuthenticateService.GetAuthProviders();
+            var authValidate = HostContext.GetPlugin<AuthFeature>()?.OnAuthenticateValidate;
+            var ret = authValidate?.Invoke(req);
+            if (ret != null)
+                return false;
+
+            req.PopulateFromRequestIfHasSessionId(requestDto);
+
+            if (!req.Items.ContainsKey(Keywords.HasPreAuthenticated))
+            {
+                //Unauthorized or invalid requests will terminate the response and return false
+                var mockResponse = new BasicRequest().Response;
+                req.Items[Keywords.HasPreAuthenticated] = true;
+                foreach (var authWithRequest in authProviders.OfType<IAuthWithRequest>())
+                {
+                    await authWithRequest.PreAuthenticateAsync(req, mockResponse).ConfigAwait();
+                    if (mockResponse.IsClosed)
+                        return false;
+                }
+                foreach (var authWithRequest in authProviders.OfType<IAuthWithRequestSync>())
+                {
+                    authWithRequest.PreAuthenticate(req, mockResponse);
+                    if (mockResponse.IsClosed)
+                        return false;
+                }
+            }
+
+            var sessionIsAuthenticated = session != null && (authProviders.Length > 0
+                ? authProviders.Any(x => session.IsAuthorized(x.Provider))
+                : session.IsAuthenticated);
+            return sessionIsAuthenticated;
+        }
+
+        [Obsolete("Use AuthenticateAsync")]
         public static void AssertAuthenticated(IRequest req, object requestDto=null, IAuthSession session=null, IAuthProvider[] authProviders=null)
         {
             if (Authenticate(req, requestDto:requestDto, session:session))
                 return;
 
-            throw new HttpError(403, ErrorMessages.NotAuthenticated.Localize(req));
+            ThrowNotAuthenticated(req);
         }
 
-        internal static Task PreAuthenticateAsync(IRequest req, IEnumerable<IAuthProvider> authProviders)
+        public static async Task AssertAuthenticatedAsync(IRequest req, object requestDto=null, IAuthSession session=null, IAuthProvider[] authProviders=null)
+        {
+            if (await AuthenticateAsync(req, requestDto:requestDto, session:session).ConfigAwait())
+                return;
+
+            ThrowNotAuthenticated(req);
+        }
+
+        public static void ThrowNotAuthenticated(IRequest req=null) => 
+            throw new HttpError(401, nameof(HttpStatusCode.Unauthorized), ErrorMessages.NotAuthenticated.Localize(req));
+
+        public static void ThrowInvalidRole(IRequest req=null) => 
+            throw new HttpError(403, nameof(HttpStatusCode.Forbidden), ErrorMessages.InvalidRole.Localize(req));
+
+        public static void ThrowInvalidPermission(IRequest req=null) => 
+            throw new HttpError(403, nameof(HttpStatusCode.Forbidden), ErrorMessages.InvalidPermission.Localize(req));
+
+        internal static async Task PreAuthenticateAsync(IRequest req, IEnumerable<IAuthProvider> authProviders)
         {
             var authValidate = HostContext.GetPlugin<AuthFeature>()?.OnAuthenticateValidate;
             var ret = authValidate?.Invoke(req);
             if (ret != null)
             {
-                return req.Response.WriteToResponse(req, ret);
+                await req.Response.WriteToResponse(req, ret).ConfigAwait();
+                return;
             }
 
             //Call before GetSession so Exceptions can bubble
@@ -139,12 +206,17 @@ namespace ServiceStack
                 req.Items[Keywords.HasPreAuthenticated] = true;
                 foreach (var authWithRequest in authProviders.OfType<IAuthWithRequest>())
                 {
+                    await authWithRequest.PreAuthenticateAsync(req, req.Response).ConfigAwait();
+                    if (req.Response.IsClosed)
+                        return;
+                }
+                foreach (var authWithRequest in authProviders.OfType<IAuthWithRequestSync>())
+                {
                     authWithRequest.PreAuthenticate(req, req.Response);
                     if (req.Response.IsClosed)
-                        return TypeConstants.EmptyTask;
+                        return;
                 }
             }
-            return TypeConstants.EmptyTask;
         }
 
         protected bool DoHtmlRedirectIfConfigured(IRequest req, IResponse res, bool includeRedirectParam = false)
@@ -189,7 +261,7 @@ namespace ServiceStack
                     : req.PathInfo + ToQueryString(req.QueryString);
 
                 var returnParam = HostContext.ResolveLocalizedString(AuthenticateService.HtmlRedirectReturnParam) ??
-                                  HostContext.ResolveLocalizedString(LocalizedStrings.Redirect);
+                    HostContext.ResolveLocalizedString(LocalizedStrings.Redirect);
 
                 if (url.IndexOf("?" + returnParam, StringComparison.OrdinalIgnoreCase) == -1 &&
                     url.IndexOf("&" + returnParam, StringComparison.OrdinalIgnoreCase) == -1)
